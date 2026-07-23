@@ -54,6 +54,12 @@ export type DbAclState = {
   followerUp: boolean;
 };
 
+/** Read-only policy needed to decide whether a DB is visible in `/_all_dbs`. */
+export type DbAccessPolicy = {
+  noacl: boolean;
+  compiledRestrict?: CompiledRestrict;
+};
+
 /**
  * In-memory per-DB ACL cache with continuous `_changes` invalidation-by-id.
  *
@@ -86,6 +92,36 @@ export class AclCache {
   /** All DB states (for readiness reporting). */
   all(): IterableIterator<DbAclState> {
     return this.dbs.values();
+  }
+
+  /**
+   * Read only the bucket policy needed by `/_all_dbs`.
+   *
+   * Unlike `ensureDb`, this never installs `_design/acl`, starts a follower, or
+   * stores a no-ACL state. A metadata listing must not mutate every database it
+   * happens to enumerate.
+   */
+  async inspectAccessPolicy(db: string): Promise<DbAccessPolicy> {
+    const existing = this.dbs.get(db);
+    if (existing?.ready && !existing.error) {
+      return {
+        noacl: existing.noacl,
+        compiledRestrict: existing.compiledRestrict,
+      };
+    }
+
+    const ddoc = await this.admin.json<{
+      restrict?: RestrictMap;
+      views?: { acl?: { map?: string } };
+    }>(`/${encodeURIComponent(db)}/_design/acl`);
+    if (!ddoc.ok) {
+      if (ddoc.status === 404) return { noacl: true };
+      throw new Error(`Failed to inspect _design/acl in ${db}: ${ddoc.status}`);
+    }
+    return {
+      noacl: !ddoc.body.views?.acl?.map,
+      compiledRestrict: compileRestrict(ddoc.body.restrict),
+    };
   }
 
   /**
@@ -285,7 +321,8 @@ export class AclCache {
   /**
    * Upgrade generated ACL ddocs while preserving bucket policy/custom views.
    * v2.0 used `_rev` stamps but its VDU incorrectly overrode proxy delete
-   * grants from parent/dbacl; older versions also used `_local_seq`.
+   * grants from parent/dbacl; older versions also used `_local_seq`. v2.1 did
+   * not recognize role owners and allowed non-creators to retarget `parent`.
    */
   private async maybeMigrateStamp(db: string, getRes: Response): Promise<void> {
     const ddoc = (await getRes.json()) as {
@@ -306,9 +343,15 @@ export class AclCache {
     const needsGlobalViewOption =
       generatedShape && version.startsWith("2.1.") && ddoc.options?.partitioned !== false;
     const usesLocalSeq = /_local_seq/.test(mapSrc) && !/doc\._rev/.test(mapSrc);
-    const hasLegacyDeleteRule = /You can't delete doc\./.test(ddoc.validate_doc_update ?? "");
+    const validateSrc = ddoc.validate_doc_update ?? "";
+    const hasLegacyDeleteRule = /You can't delete doc\./.test(validateSrc);
     const needsLegacyRewrite = legacyGeneratedVersion && (usesLocalSeq || hasLegacyDeleteRule);
-    if (!needsLegacyRewrite && !needsGlobalViewOption) return;
+    const needsOwnerPolicyRewrite =
+      generatedShape &&
+      version.startsWith("2.1.") &&
+      /Readers list can not be changed\./.test(validateSrc) &&
+      (!/Parent can not be changed\./.test(validateSrc) || !/roleToken/.test(validateSrc));
+    if (!needsLegacyRewrite && !needsOwnerPolicyRewrite && !needsGlobalViewOption) return;
 
     const generated = buildAclDesignDoc();
     const next = needsLegacyRewrite
@@ -324,11 +367,22 @@ export class AclCache {
           views: { ...ddoc.views, acl: generated.views.acl },
           validate_doc_update: generated.validate_doc_update,
         }
-      : {
-          ...ddoc,
-          options: { ...ddoc.options, partitioned: false },
-          stamp: generated.stamp,
-        };
+      : needsOwnerPolicyRewrite
+        ? {
+            ...ddoc,
+            _id: ddoc._id ?? generated._id,
+            _rev: ddoc._rev,
+            options: { ...ddoc.options, ...generated.options },
+            type: generated.type,
+            version: generated.version,
+            stamp: generated.stamp,
+            validate_doc_update: generated.validate_doc_update,
+          }
+        : {
+            ...ddoc,
+            options: { ...ddoc.options, partitioned: false },
+            stamp: generated.stamp,
+          };
     const put = await this.admin.fetch(`/${encodeURIComponent(db)}/_design/acl`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -337,7 +391,7 @@ export class AclCache {
     if (!put.ok) {
       throw new Error(`Failed to upgrade _design/acl in ${db}: ${put.status}`);
     } else {
-      log.info("upgraded _design/acl", { db, version: generated.version });
+      log.info("upgraded _design/acl", { db, version: String(next.version ?? version) });
     }
   }
 

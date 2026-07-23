@@ -397,6 +397,26 @@ describe("AclCache row refresh failures", () => {
 });
 
 describe("AclCache auto-install policy", () => {
+  it("inspects _all_dbs visibility without installing or caching ACL state", async () => {
+    const config = loadConfig({
+      COUCH_URL: "http://127.0.0.1:5984",
+      ACL_AUTO_INSTALL: "true",
+      RATE_LIMIT_ENABLED: "false",
+    });
+    const cache = new AclCache(config);
+    const methods: string[] = [];
+    cache.adminClient.fetch = vi.fn(async (_path: string, init?: { method?: string }) => {
+      methods.push(init?.method ?? "GET");
+      return new Response("not found", { status: 404 });
+    }) as typeof cache.adminClient.fetch;
+
+    const policy = await cache.inspectAccessPolicy("fresh-app");
+
+    expect(policy).toEqual({ noacl: true });
+    expect(methods).toEqual(["GET"]);
+    expect(cache.get("fresh-app")).toBeUndefined();
+  });
+
   it("does not PUT _design/acl into system DBs", async () => {
     const config = loadConfig({
       COUCH_URL: "http://127.0.0.1:5984",

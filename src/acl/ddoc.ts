@@ -15,7 +15,7 @@
  */
 
 /** Build a fresh `_design/acl` document (no `_rev`; caller supplies on update). */
-export function buildAclDesignDoc(version = "2.1.0") {
+export function buildAclDesignDoc(version = "2.2.0") {
   return {
     _id: "_design/acl",
     language: "javascript",
@@ -94,11 +94,14 @@ export const ACL_MAP_SOURCE = `function (doc) {
  * proxy because parent and dbacl grants are unavailable to Couch's VDU.
  */
 export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
-  var adm = !!(userCtx.roles.indexOf("_admin") >= 0);
+  var roles = userCtx.roles || [];
+  var adm = !!(roles.indexOf("_admin") >= 0);
   var u = userCtx.name;
   var uu = "u-" + u;
   var O = "object";
   var F = "function";
+  var S = "string";
+  var rr = /^r-/;
   var isA = function (o) {
     return typeof o == O && typeof o.slice == F;
   };
@@ -116,6 +119,15 @@ export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
       var nda = isA(nd.acl) ? nd.acl.sort() + "" : "";
       var notCreator = odc != u && odc != uu;
       var notOwner = notCreator && odw.indexOf(u) == -1 && odw.indexOf(uu) == -1;
+      var i, roleToken;
+      for (i = 0; notOwner && i < roles.length; i++) {
+        if (typeof roles[i] == S) {
+          roleToken = rr.test(roles[i]) ? roles[i] : "r-" + roles[i];
+          if (odw.indexOf(roleToken) >= 0) notOwner = false;
+        }
+      }
+      var odp = typeof od.parent == S ? od.parent : "";
+      var ndp = typeof nd.parent == S ? nd.parent : "";
 
       if (!nd._deleted) {
         if (odc && odc != ndc) throw { forbidden: "Creator can not be changed." };
@@ -123,6 +135,8 @@ export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
           throw { forbidden: "Owners list can not be changed." };
         if (notOwner && oda != nda)
           throw { forbidden: "Readers list can not be changed." };
+        if (notCreator && odp != ndp)
+          throw { forbidden: "Parent can not be changed." };
       }
     }
   }
