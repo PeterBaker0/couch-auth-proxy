@@ -119,34 +119,45 @@ export function normalizeBulkResults(
       idCounts.set(doc._id, (idCounts.get(doc._id) ?? 0) + 1);
     }
   }
+  const exact = new Map<string, number[]>();
+  const byId = new Map<string, number[]>();
+  const withoutRev = new Map<string, number[]>();
+  const unidentified: number[] = [];
   const used = new Set<number>();
+  for (let index = 0; index < couchResults.length; index++) {
+    const result = couchResults[index]!;
+    if (typeof result.id !== "string") {
+      unidentified.push(index);
+      continue;
+    }
+    pushIndex(byId, result.id, index);
+    if (typeof result.rev === "string") {
+      pushIndex(exact, resultIdentity(result.id, result.rev), index);
+    } else {
+      pushIndex(withoutRev, result.id, index);
+    }
+  }
 
   return allowed.map((doc) => {
     const id = typeof doc._id === "string" ? doc._id : undefined;
     const rev = bulkDocRevision(doc);
-    let match = -1;
+    let match: number | undefined;
     if (id && rev) {
-      match = couchResults.findIndex(
-        (result, index) => !used.has(index) && result.id === id && result.rev === rev,
-      );
+      match = takeUnused(exact.get(resultIdentity(id, rev)), used);
     }
-    if (match < 0 && id && idCounts.get(id) === 1) {
-      match = couchResults.findIndex((result, index) => !used.has(index) && result.id === id);
+    if (match == null && id && idCounts.get(id) === 1) {
+      match = takeUnused(byId.get(id), used);
     }
-    if (match < 0 && allowed.length === 1) {
-      match = couchResults.findIndex((_result, index) => !used.has(index));
+    if (match == null && allowed.length === 1) {
+      match = takeUnused(unidentified, used);
     }
-    if (match >= 0) {
+    if (match != null) {
       used.add(match);
       return couchResults[match]!;
     }
 
     const ambiguous =
-      id != null &&
-      (idCounts.get(id) ?? 0) > 1 &&
-      couchResults.some(
-        (result, index) => !used.has(index) && result.id === id && typeof result.rev !== "string",
-      );
+      id != null && (idCounts.get(id) ?? 0) > 1 && hasUnused(withoutRev.get(id), used);
     if (ambiguous) {
       return {
         id,
@@ -161,6 +172,28 @@ export function normalizeBulkResults(
       rev,
     };
   });
+}
+
+function resultIdentity(id: string, rev: string): string {
+  return JSON.stringify([id, rev]);
+}
+
+function pushIndex(target: Map<string, number[]>, key: string, index: number): void {
+  const indexes = target.get(key) ?? [];
+  indexes.push(index);
+  target.set(key, indexes);
+}
+
+function takeUnused(indexes: number[] | undefined, used: Set<number>): number | undefined {
+  while (indexes?.length) {
+    const index = indexes.pop()!;
+    if (!used.has(index)) return index;
+  }
+  return undefined;
+}
+
+function hasUnused(indexes: number[] | undefined, used: Set<number>): boolean {
+  return indexes?.some((index) => !used.has(index)) ?? false;
 }
 
 /** Revision identity accepted by Couch replication bodies. */

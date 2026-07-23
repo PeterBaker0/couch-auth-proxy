@@ -83,7 +83,7 @@ async function refreshWrittenDoc(
     // accurate, and subsequent ACL requests fail closed until reload.
     return;
   }
-  if (deleting && !state.acl.has(id) && retained) {
+  if (!state.acl.has(id) && retained && (deleting || retained.deleted)) {
     state.acl.set(id, { ...retained, deleted: true });
   }
 }
@@ -265,9 +265,11 @@ export const actors: Record<string, Actor> = {
 
     // Direct JSON document writes can carry a tombstone. Attachments are
     // arbitrary bytes and use the route method for delete authorization.
+    const contentType = c.req.header("content-type")?.toLowerCase() ?? "";
+    const directDocumentWrite =
+      c.req.method === "POST" || (c.req.method === "PUT" && c.req.param("attachment") == null);
     const inspectBody =
-      !principal.admin &&
-      (c.req.method === "POST" || (c.req.method === "PUT" && c.req.param("attachment") == null));
+      directDocumentWrite && !(principal.admin && contentType.startsWith("multipart/"));
     if (inspectBody) {
       try {
         bufferedBody = await readTextLimited(c.req.raw, c.get("config").server.maxBodyBytes);
@@ -306,7 +308,6 @@ export const actors: Record<string, Actor> = {
     }
 
     if (bodyParseFailed) {
-      const contentType = c.req.header("content-type")?.toLowerCase() ?? "";
       if (contentType.startsWith("multipart/")) {
         return couchError(
           "not_implemented",
@@ -332,6 +333,14 @@ export const actors: Record<string, Actor> = {
         rewriteLocation: {
           fromOrigin: new URL(config.couch.url).origin,
         },
+      });
+    }
+    if (principal.admin && directDocumentWrite && id) {
+      const config = c.get("config");
+      const upstream = await fetchFromCouch(c, config);
+      if (upstream.ok) await refreshWrittenDoc(c, state, id, true);
+      return toClientResponse(upstream, {
+        rewriteLocation: { fromOrigin: new URL(config.couch.url).origin },
       });
     }
     await next();
@@ -379,7 +388,9 @@ export const actors: Record<string, Actor> = {
       return couchError("not_found", "missing", 404);
     }
     if (!flags._w || !flags._d) return couchError("forbidden", "ACL", 403);
-    await next();
+    const upstream = await fetchFromCouch(c, c.get("config"));
+    if (upstream.ok) await refreshWrittenDoc(c, state, id, true);
+    return toClientResponse(upstream);
   },
 
   /**
@@ -407,7 +418,12 @@ export const actors: Record<string, Actor> = {
     await ensureDocRow(c.get("aclCache"), state, destId);
     const destFlags = flagsForDoc(state, c.get("principal"), destId);
     if (!destFlags._w) return couchError("forbidden", "ACL", 403);
-    return forwardToCouch(c, c.get("config"));
+    const config = c.get("config");
+    const upstream = await fetchFromCouch(c, config);
+    if (upstream.ok) await refreshWrittenDoc(c, state, destId, false);
+    return toClientResponse(upstream, {
+      rewriteLocation: { fromOrigin: new URL(config.couch.url).origin },
+    });
   },
 
   /** Proxy then filter `_all_docs` / view rows by read ACL. */

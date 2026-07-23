@@ -437,6 +437,53 @@ describe("authoritative write refresh", () => {
     expect(state.acl.get("shared")?._r["u-carol"]).toBeUndefined();
   });
 
+  it("refreshes administrator writes instead of waiting for the follower", async () => {
+    const state = stateWith([{ _id: "shared", creator: "alice" }]);
+    const admin = buildPrincipal({
+      ok: true,
+      userCtx: { name: "admin", roles: ["_admin"] },
+      info: { authenticated: "default" },
+    });
+    const { app, services } = appWithState(state, 200, admin);
+    services.aclCache.refreshDoc = vi.fn(async () => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{}", { status: 201 })),
+    );
+
+    const res = await app.request("http://localhost/docs/shared", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ _id: "shared", creator: "alice", acl: [] }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(services.aclCache.refreshDoc).toHaveBeenCalledWith("docs", "shared");
+  });
+
+  it("retains tombstone grants when a non-winning revision is replayed", async () => {
+    const state = stateWith([{ _id: "deleted", creator: "bob" }]);
+    state.acl.set("deleted", { ...state.acl.get("deleted")!, deleted: true });
+    const { app, services } = appWithState(state);
+    services.aclCache.refreshDoc = vi.fn(async () => {
+      state.acl.delete("deleted");
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("[]", { status: 201 })),
+    );
+
+    const res = await app.request("http://localhost/docs/deleted?new_edits=false", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ _id: "deleted", _rev: "1-old", creator: "bob" }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(state.acl.get("deleted")?.deleted).toBe(true);
+    expect(state.acl.get("deleted")?._r["u-bob"]).toBe(1);
+  });
+
   it("marks a successfully deleted parent before authorizing children", async () => {
     const state = stateWith([
       { _id: "parent", creator: "bob" },
