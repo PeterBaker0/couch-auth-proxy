@@ -15,7 +15,7 @@
  */
 
 /** Build a fresh `_design/acl` document (no `_rev`; caller supplies on update). */
-export function buildAclDesignDoc(version = "2.0.0") {
+export function buildAclDesignDoc(version = "2.1.0") {
   return {
     _id: "_design/acl",
     language: "javascript",
@@ -87,8 +87,9 @@ export const ACL_MAP_SOURCE = `function (doc) {
 }`;
 
 /**
- * Couch `validate_doc_update` source: non-admins cannot forge creator,
- * change owners/acl without standing, or delete unless they are the creator.
+ * Couch `validate_doc_update` source: non-admins cannot forge creator or
+ * change owners/acl without standing. Delete authorization belongs to the
+ * proxy because parent and dbacl grants are unavailable to Couch's VDU.
  */
 export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
   var adm = !!(userCtx.roles.indexOf("_admin") >= 0);
@@ -120,8 +121,6 @@ export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
           throw { forbidden: "Owners list can not be changed." };
         if (notOwner && oda != nda)
           throw { forbidden: "Readers list can not be changed." };
-      } else {
-        if (notCreator) throw { forbidden: "You can't delete doc." };
       }
     }
   }

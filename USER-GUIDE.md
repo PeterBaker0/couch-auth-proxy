@@ -140,12 +140,12 @@ Application data. ACL is derived from optional fields on the doc itself (see nex
 
 These are ordinary JSON fields—not a separate doc type. The `_design/acl` map view indexes them into compact r/w/d grants.
 
-| Field     | Capability                                                                                                                                    |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `creator` | Full **r / w / d**. Set at create time to the current user (`"alice"` or `"u-alice"`). Immutable for non-admins. Only the creator may delete. |
-| `owners`  | **r / w** (not delete). May not change `creator` / `owners`. May change `acl` (readers).                                                      |
-| `acl`     | **read** only. Also the capability checked for `_update` handlers (read, not write).                                                          |
-| `parent`  | Doc id whose ACL is **unioned** (most permissive wins). One level of parent is used.                                                          |
+| Field     | Capability                                                                                                       |
+| --------- | ---------------------------------------------------------------------------------------------------------------- |
+| `creator` | Full **r / w / d**. Set at create time to the current user (`"alice"` or `"u-alice"`). Immutable for non-admins. |
+| `owners`  | **r / w** (not delete). May not change `creator` / `owners`. May change `acl` (readers).                         |
+| `acl`     | **read** only. Also the capability checked for `_update` handlers (read, not write).                             |
+| `parent`  | Doc id whose ACL is **unioned** (most permissive wins). One level of parent is used.                             |
 
 **Defaults when none of `creator` / `owners` / `acl` are present:** open **r/w/d** to `r-*` (any authenticated member).
 
@@ -183,7 +183,7 @@ For a non-admin principal matching the listed grant:
 | via `parent` only                | union of parent’s grants     | same           | same   | —            | —                                            |
 | via `dbacl` overlay              | extra flags on **every** doc | same           | same   | —            | —                                            |
 
-Server admins always pass. Couch `validate_doc_update` on `_design/acl` also blocks forging `creator` on create and illegal ownership/acl edits even if a request slipped past the proxy.
+Server admins always pass. Couch `validate_doc_update` on `_design/acl` also blocks forging `creator` on create and illegal ownership/acl edits. Delete authorization remains in the proxy because Couch's validation function cannot load a parent ACL or the ddoc's `dbacl` overlay.
 
 ---
 

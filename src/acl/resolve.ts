@@ -16,8 +16,9 @@ import type { AclFlags, AclRow, DbAclOverlay } from "./types.js";
  * Resolve r/w/d for a principal against a cached ACL row (+ optional parent + dbacl).
  *
  * When a row exists, flags start denied and tokens from the row/parent grant access.
- * When `noacl` is set, per-doc rows are ignored (pass-through) but `dbacl` still applies
- * if present. Design docs without grants remain non-writable for non-admins.
+ * When `noacl` is set, document ACLs and `dbacl` are not enforced because there
+ * is no usable ACL map; the database passes through to Couch `_security`.
+ * Design docs without grants remain non-writable for non-admins.
  */
 export function resolveDocAcl(params: {
   principal: Principal;
@@ -95,6 +96,7 @@ function applyDbacl(acl: AclFlags, dbacl: DbAclOverlay, tokens: string[]): void 
  */
 export function aclRowFromDoc(doc: {
   _id: string;
+  _rev?: string;
   creator?: string;
   owners?: string[];
   acl?: string[];
@@ -102,7 +104,7 @@ export function aclRowFromDoc(doc: {
   _local_seq?: string | number;
 }): AclRow {
   const row: AclRow = {
-    s: doc._local_seq ?? 0,
+    s: doc._rev ?? doc._local_seq ?? 0,
     p: typeof doc.parent === "string" ? doc.parent : "",
     _r: {},
     _w: {},
@@ -110,7 +112,8 @@ export function aclRowFromDoc(doc: {
   };
 
   let grantSourceCount = 0;
-  const asUser = (v: string) => (v.startsWith("u-") || v.startsWith("r-") ? v : `u-${v}`);
+  const asUser = (v: string) => (v.startsWith("u-") ? v : `u-${v}`);
+  const asUserOrRole = (v: string) => (v.startsWith("u-") || v.startsWith("r-") ? v : `u-${v}`);
 
   if (typeof doc.creator === "string" && doc.creator) {
     const userToken = asUser(doc.creator);
@@ -130,7 +133,7 @@ export function aclRowFromDoc(doc: {
   if (Array.isArray(doc.owners)) {
     for (const raw of doc.owners) {
       if (typeof raw !== "string") continue;
-      const token = asUser(raw);
+      const token = asUserOrRole(raw);
       row._r[token] = 1;
       row._w[token] = 1;
     }

@@ -111,8 +111,8 @@ describe("ChangesFollower onUp / onError", () => {
   });
 });
 
-describe("AclCache.applyChange fetch failures", () => {
-  it("does not delete ACL rows when the view fetch fails", async () => {
+describe("AclCache row refresh failures", () => {
+  it("retains rows but marks the DB unavailable when a change refresh fails", async () => {
     const config = loadConfig({
       COUCH_URL: "http://127.0.0.1:5984",
       COUCH_ADMIN_USER: "admin",
@@ -146,18 +146,46 @@ describe("AclCache.applyChange fetch failures", () => {
       text: "boom",
     })) as typeof cache.adminClient.json;
 
-    await (
-      cache as unknown as {
-        applyChange: (
-          db: string,
-          state: DbAclState,
-          id: string,
-          deleted?: boolean,
-        ) => Promise<void>;
-      }
-    ).applyChange("acldemo", state, "secret", false);
+    await expect(
+      (
+        cache as unknown as {
+          applyChange: (
+            db: string,
+            state: DbAclState,
+            id: string,
+            deleted?: boolean,
+          ) => Promise<void>;
+        }
+      ).applyChange("acldemo", state, "secret", false),
+    ).rejects.toBeInstanceOf(AclUnavailableError);
 
     expect(state.acl.has("secret")).toBe(true);
+    expect(state.ready).toBe(false);
+    expect(state.followerUp).toBe(false);
+    expect(state.error).toMatch(/refresh failed/i);
+  });
+
+  it("fails closed when an on-demand missing-row lookup fails", async () => {
+    const cache = cacheWithState({
+      name: "acldemo",
+      acl: new Map(),
+      noacl: false,
+      ready: true,
+      followerUp: true,
+    });
+    cache.adminClient.json = vi.fn(async () => ({
+      ok: false as const,
+      status: 500,
+      text: "boom",
+    })) as typeof cache.adminClient.json;
+
+    await expect(cache.refreshDoc("acldemo", "possibly-existing")).rejects.toBeInstanceOf(
+      AclUnavailableError,
+    );
+    const state = cache.get("acldemo")!;
+    expect(state.ready).toBe(false);
+    expect(state.followerUp).toBe(false);
+    expect(state.error).toMatch(/row unavailable/i);
   });
 
   it("keeps ACL rows on deleted:true so tombstones stay readable", async () => {
@@ -362,5 +390,70 @@ describe("AclCache auto-install policy", () => {
     const state = await cache.ensureDb("appdb");
     expect(state.noacl).toBe(true);
     expect(puts).toEqual([]);
+  });
+});
+
+describe("AclCache bulk load", () => {
+  it("pages the ACL view and swaps in the complete result", async () => {
+    const config = loadConfig({
+      COUCH_URL: "http://127.0.0.1:5984",
+      RATE_LIMIT_ENABLED: "false",
+    });
+    const cache = new AclCache(config);
+    const state: DbAclState = {
+      name: "large",
+      acl: new Map(),
+      noacl: false,
+      ready: false,
+      followerUp: false,
+    };
+    const row = (id: string) => ({
+      id,
+      key: id,
+      value: {
+        s: "1-a",
+        p: "",
+        _r: { "u-alice": 1 },
+        _w: { "u-alice": 1 },
+        _d: { "u-alice": 1 },
+      },
+    });
+    const firstPage = Array.from({ length: 2_000 }, (_, i) =>
+      row(`doc-${String(i).padStart(4, "0")}`),
+    );
+    const viewQueries: Array<Record<string, string> | undefined> = [];
+
+    cache.adminClient.json = vi.fn(
+      async (path: string, init?: { query?: Record<string, string> }) => {
+        if (path.endsWith("/_design/acl")) {
+          return {
+            ok: true as const,
+            status: 200,
+            body: { views: { acl: { map: "function (doc) { emit(doc._id, doc); }" } } },
+          };
+        }
+        viewQueries.push(init?.query);
+        return {
+          ok: true as const,
+          status: 200,
+          body: { rows: viewQueries.length === 1 ? firstPage : [row("doc-final")] },
+        };
+      },
+    ) as typeof cache.adminClient.json;
+
+    await (
+      cache as unknown as {
+        loadAll: (db: string, target: DbAclState) => Promise<void>;
+      }
+    ).loadAll("large", state);
+
+    expect(state.acl).toHaveLength(2_001);
+    expect(state.acl.has("doc-final")).toBe(true);
+    expect(viewQueries).toHaveLength(2);
+    expect(viewQueries[0]).toMatchObject({ limit: "2000", reduce: "false" });
+    expect(viewQueries[1]).toMatchObject({
+      startkey: JSON.stringify("doc-1999"),
+      skip: "1",
+    });
   });
 });

@@ -84,6 +84,35 @@ describe("resolveDocAcl", () => {
     ).toEqual({ _r: true, _w: false, _d: false });
   });
 
+  it("inherits parent delete grants", () => {
+    const parent = aclRowFromDoc({ _id: "parent", creator: "bob" });
+    const child = aclRowFromDoc({
+      _id: "child",
+      creator: "alice",
+      parent: "parent",
+    });
+    expect(
+      resolveDocAcl({
+        principal: principal("bob"),
+        docId: "child",
+        row: child,
+        parentRow: parent,
+      }),
+    ).toEqual({ _r: true, _w: true, _d: true });
+  });
+
+  it("applies database-level delete grants", () => {
+    const row = aclRowFromDoc({ _id: "doc", creator: "alice" });
+    expect(
+      resolveDocAcl({
+        principal: principal("bob"),
+        docId: "doc",
+        row,
+        dbacl: { _d: ["u-bob"] },
+      }),
+    ).toEqual({ _r: false, _w: false, _d: true });
+  });
+
   it("open docs (no creator/owners/acl) allow r-*", () => {
     const row = aclRowFromDoc({ _id: "open" });
     expect(resolveDocAcl({ principal: principal("stranger"), docId: "open", row })).toEqual({
@@ -91,5 +120,24 @@ describe("resolveDocAcl", () => {
       _w: true,
       _d: true,
     });
+  });
+});
+
+describe("aclRowFromDoc map parity", () => {
+  it("treats a role-prefixed creator as a username like the Couch map", () => {
+    const row = aclRowFromDoc({ _id: "doc", creator: "r-editors" });
+    expect(row._r).toEqual({ "u-r-editors": 1 });
+    expect(row._w).toEqual({ "u-r-editors": 1 });
+    expect(row._d).toEqual({ "u-r-editors": 1 });
+  });
+
+  it("uses document revision as the v2 freshness stamp", () => {
+    const row = aclRowFromDoc({
+      _id: "doc",
+      _rev: "3-current",
+      _local_seq: 17,
+      creator: "alice",
+    });
+    expect(row.s).toBe("3-current");
   });
 });
