@@ -144,7 +144,9 @@ export function normalizeBulkResults(
     const ambiguous =
       id != null &&
       (idCounts.get(id) ?? 0) > 1 &&
-      couchResults.some((result, index) => !used.has(index) && result.id === id);
+      couchResults.some(
+        (result, index) => !used.has(index) && result.id === id && typeof result.rev !== "string",
+      );
     if (ambiguous) {
       return {
         id,
