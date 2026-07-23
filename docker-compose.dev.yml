@@ -1,0 +1,8 @@
+# Local tooling overlay: publish CouchDB on the host for admin/debug.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+services:
+  couchdb:
+    ports:
+      # Host 5985 avoids clashing with other local CouchDB instances on 5984
+      - "5985:5984"

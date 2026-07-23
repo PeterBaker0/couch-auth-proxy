@@ -1,0 +1,21 @@
+# Production-oriented overlay (example). Secrets should come from your orchestrator.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Couch stays internal (no host publish). couch-auth-proxy enables rate limits and
+# expects CORS_ORIGINS + TRUST_PROXY_HOPS from the environment / secrets.
+services:
+  couch-auth-proxy:
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      NODE_ENV: production
+      RATE_LIMIT_ENABLED: "true"
+      TRUST_PROXY_HOPS: "1"
+      # Provision `_design/acl` out-of-band (or via preload with ACL_AUTO_INSTALL=true).
+      ACL_AUTO_INSTALL: "false"
+      # Set explicitly in deploy env, e.g.:
+      # CORS_ORIGINS: https://app.example.com
+      # COUCH_ADMIN_PASSWORD: <from secret>
+    # Do not publish Couch; only couch-auth-proxy (inherited from base compose).

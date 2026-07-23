@@ -1,0 +1,57 @@
+{
+  "name": "couch-auth-proxy",
+  "version": "2.0.0",
+  "description": "Per-document r/w/d ACL proxy for Apache CouchDB 3.5+",
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@10.12.4",
+  "engines": {
+    "node": ">=24",
+    "pnpm": ">=10"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "docker:up": "docker compose up -d --build",
+    "docker:up:dev": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build",
+    "docker:down": "docker compose down -v",
+    "docker:logs": "docker compose logs -f couch-auth-proxy couchdb",
+    "lint": "oxlint .",
+    "lint:fix": "oxlint --fix .",
+    "fmt": "oxfmt .",
+    "fmt:check": "oxfmt --check .",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*": "oxfmt --no-error-on-unmatched-pattern"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.4",
+    "hono": "^4.8.5",
+    "jose": "^6.0.11",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.1.1",
+    "oxfmt": "^0.60.0",
+    "oxlint": "^1.75.0",
+    "pouchdb": "^9.0.0",
+    "pouchdb-adapter-memory": "^9.0.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "license": "MIT"
+}
