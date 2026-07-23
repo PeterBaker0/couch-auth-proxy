@@ -7,6 +7,7 @@ import { AclUnavailableError, type DbAclState } from "../../src/acl/cache.js";
 import { aclRowFromDoc } from "../../src/acl/resolve.js";
 import { createApp, createServices } from "../../src/app.js";
 import { buildPrincipal } from "../../src/auth/principal.js";
+import type { Principal } from "../../src/auth/types.js";
 import { loadConfig } from "../../src/config.js";
 
 function bobPrincipal() {
@@ -27,14 +28,14 @@ function stateWith(docs: Array<Parameters<typeof aclRowFromDoc>[0]>): DbAclState
   };
 }
 
-function appWithState(state: DbAclState, maxIdLength = 200) {
+function appWithState(state: DbAclState, maxIdLength = 200, principal: Principal = bobPrincipal()) {
   const config = loadConfig({
     COUCH_URL: "http://127.0.0.1:5984",
     COUCH_MAX_ID_LENGTH: String(maxIdLength),
     RATE_LIMIT_ENABLED: "false",
   });
   const services = createServices(config);
-  services.sessions.resolve = async () => bobPrincipal();
+  services.sessions.resolve = async () => principal;
   services.aclCache.requireReady = async () => state;
   return { app: createApp(services), services };
 }
@@ -168,6 +169,104 @@ describe("_bulk_docs input validation", () => {
   });
 });
 
+describe("replication revision probes", () => {
+  it("refreshes unknown ids before deciding create-path access", async () => {
+    const state = stateWith([]);
+    const { app, services } = appWithState(state);
+    services.aclCache.refreshDoc = vi.fn(async (_db: string, id: string) => {
+      if (id === "private") {
+        state.acl.set("private", aclRowFromDoc({ _id: "private", creator: "alice" }));
+      }
+    });
+    const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        "new-doc": ["1-new"],
+      });
+      return new Response(JSON.stringify({ "new-doc": { missing: ["1-new"] } }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/_revs_diff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        private: ["1-secret"],
+        "new-doc": ["1-new"],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ "new-doc": { missing: ["1-new"] } });
+    expect(services.aclCache.refreshDoc).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("Couch response compatibility", () => {
+  it("preserves end-to-end Couch headers on filtered responses", async () => {
+    const state = stateWith([
+      { _id: "private", creator: "alice" },
+      { _id: "shared", creator: "alice", acl: ["u-bob"] },
+    ]);
+    const { app } = appWithState(state);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            total_rows: 2,
+            rows: [
+              { id: "private", key: "private", value: { rev: "1-a" } },
+              { id: "shared", key: "shared", value: { rev: "1-b" } },
+            ],
+          }),
+          {
+            headers: {
+              "Content-Type": "application/json",
+              ETag: '"couch-etag"',
+              "X-Couch-Request-ID": "request-123",
+              Connection: "keep-alive",
+            },
+          },
+        );
+      }),
+    );
+
+    const res = await app.request("http://localhost/docs/_all_docs");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBe('"couch-etag"');
+    expect(res.headers.get("x-couch-request-id")).toBe("request-123");
+    expect(res.headers.get("connection")).toBeNull();
+    const body = (await res.json()) as { rows: Array<{ id: string }> };
+    expect(body.rows.map((row) => row.id)).toEqual(["shared"]);
+  });
+});
+
+describe("admin forwarding", () => {
+  it("rejects protocol-relative paths instead of escaping the Couch origin", async () => {
+    const admin = buildPrincipal({
+      ok: true,
+      userCtx: { name: "admin", roles: ["_admin"] },
+      info: { authenticated: "default" },
+    });
+    const { app } = appWithState(stateWith([]), 200, admin);
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost//127.0.0.1:9/secret", {
+      headers: { Authorization: "Basic sensitive" },
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "bad_request",
+      reason: "Invalid request path",
+    });
+    expect(upstream).not.toHaveBeenCalled();
+  });
+});
+
 describe("COPY destination authorization", () => {
   const state = stateWith([
     { _id: "source", creator: "alice", acl: ["u-bob"] },
@@ -199,6 +298,27 @@ describe("COPY destination authorization", () => {
         headers: { Destination: destination },
       });
       expect(res.status, destination).toBe(400);
+    }
+    expect(upstream).not.toHaveBeenCalled();
+  });
+});
+
+describe("reserved design endpoints", () => {
+  it("classifies CouchDB 3.5 search and rewrite routes before attachments", async () => {
+    const state = stateWith([{ _id: "_design/app" }]);
+    const { app } = appWithState(state);
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    for (const path of [
+      "/docs/_design/app/_search/by_name",
+      "/docs/_design/app/_nouveau/by_name",
+      "/docs/_design/app/_search_info/by_name",
+      "/docs/_design/app/_nouveau_info/by_name",
+      "/docs/_design/app/_rewrite",
+    ]) {
+      const res = await app.request(`http://localhost${path}`);
+      expect(res.status, path).toBe(403);
     }
     expect(upstream).not.toHaveBeenCalled();
   });

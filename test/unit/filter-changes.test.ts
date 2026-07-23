@@ -105,6 +105,39 @@ describe("filterChangesStream", () => {
     expect(output).toContain(": heartbeat");
   });
 
+  it("does not let last_seq turn a denied change into control metadata", async () => {
+    const continuous = await text(
+      filterChangesStream(
+        stream(
+          '{"id":"private","seq":"1-a","last_seq":"1-a"}\n',
+          '{"id":"shared","seq":"2-b","last_seq":"2-b"}\n',
+          '{"last_seq":"2-b","pending":0}\n',
+        ),
+        state(),
+        principal("bob"),
+        "continuous",
+      ),
+    );
+    expect(continuous).not.toContain("private");
+    expect(continuous).toContain('"id":"shared"');
+    expect(continuous).toContain('{"last_seq":"2-b","pending":0}');
+
+    const eventsource = await text(
+      filterChangesStream(
+        stream(
+          'data: {"id":"private","seq":"1-a","last_seq":"1-a"}\nid: 1-a\n\n',
+          'data: {"last_seq":"2-b"}\n\n',
+        ),
+        state(),
+        principal("bob"),
+        "eventsource",
+      ),
+    );
+    expect(eventsource).not.toContain("private");
+    expect(eventsource).not.toContain("id: 1-a");
+    expect(eventsource).toContain('data: {"last_seq":"2-b"}');
+  });
+
   it("rejects oversized buffered normal feeds", async () => {
     const filtered = filterChangesStream(
       stream(JSON.stringify({ results: [], padding: "x".repeat(200) })),

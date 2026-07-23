@@ -40,6 +40,7 @@ const ids = {
   alicePrivate: `alice-private-${suiteId}`,
   bobReader: `bob-reader-${suiteId}`,
   bobOwner: `bob-owner-${suiteId}`,
+  roleOwner: `role-owner-${suiteId}`,
   open: `open-${suiteId}`,
   withAtt: `with-att-${suiteId}`,
   secretAtt: `secret-att-${suiteId}`,
@@ -104,6 +105,11 @@ describe("security edge cases", () => {
       [
         ids.bobOwner,
         { creator: "alice", owners: ["u-bob"], kind: "owner", body: "bob-own" },
+        aliceJwt,
+      ],
+      [
+        ids.roleOwner,
+        { creator: "alice", owners: ["r-writers"], kind: "role-owner", body: "team-edit" },
         aliceJwt,
       ],
       [ids.open, { kind: "open", body: "any-auth" }, aliceJwt],
@@ -314,11 +320,27 @@ describe("security edge cases", () => {
       expect(attRow?.doc?._attachments).toBeTruthy();
     });
 
-    it("unencoded nested attachment path is rejected (404), not piped", async () => {
+    it("supports CouchDB attachment names containing path segments", async () => {
+      const docRes = await getDoc(DB, ids.withAtt, authHeaders("jwt", aliceJwt));
+      const rev = ((await docRes.json()) as { _rev: string })._rev;
+      const put = await fetch(
+        `${PROXY}/${DB}/${encodeURIComponent(ids.withAtt)}/nested/path.txt?rev=${encodeURIComponent(rev)}`,
+        {
+          method: "PUT",
+          headers: {
+            ...authHeaders("jwt", aliceJwt),
+            "Content-Type": "text/plain",
+          },
+          body: "nested-attachment",
+        },
+      );
+      expect(put.ok, `nested attachment PUT: ${put.status} ${await put.text()}`).toBe(true);
+
       const res = await fetch(`${PROXY}/${DB}/${encodeURIComponent(ids.withAtt)}/nested/path.txt`, {
         headers: authHeaders("jwt", bobJwt),
       });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("nested-attachment");
     });
 
     it("Range request on readable attachment is allowed after ACL", async () => {
@@ -740,6 +762,30 @@ describe("security edge cases", () => {
       expect(carol.status).toBe(404);
     });
 
+    it("role owner can change readers but cannot retarget parent inheritance", async () => {
+      const current = await getDoc(DB, ids.roleOwner, authHeaders("jwt", bobJwt));
+      expect(current.status).toBe(200);
+      const doc = (await current.json()) as Record<string, unknown>;
+      const share = await putDoc(
+        DB,
+        ids.roleOwner,
+        { ...doc, acl: ["u-carol"] },
+        authHeaders("jwt", bobJwt),
+      );
+      expect(share.ok, `role owner share: ${share.status} ${await share.text()}`).toBe(true);
+      await waitForReadable(DB, ids.roleOwner, authHeaders("jwt", carolJwt));
+
+      const latest = await getDoc(DB, ids.roleOwner, authHeaders("jwt", bobJwt));
+      const latestDoc = (await latest.json()) as Record<string, unknown>;
+      const retarget = await putDoc(
+        DB,
+        ids.roleOwner,
+        { ...latestDoc, parent: ids.open },
+        authHeaders("jwt", bobJwt),
+      );
+      expect(retarget.status).toBeGreaterThanOrEqual(400);
+    });
+
     it("owner cannot bypass delete ACL with a PUT tombstone", async () => {
       const docRes = await getDoc(DB, ids.bobOwner, authHeaders("jwt", bobJwt));
       const doc = (await docRes.json()) as Record<string, unknown>;
@@ -964,15 +1010,47 @@ describe("security edge cases", () => {
 
   describe("default-deny leftovers", () => {
     it("search/nouveau paths are admin-only", async () => {
-      const search = await fetch(`${PROXY}/${DB}/_search/foo`, {
+      const search = await fetch(`${PROXY}/${DB}/_design/app/_search/foo`, {
         headers: authHeaders("jwt", aliceJwt),
       });
       expect(search.status).toBe(403);
 
-      const nouveau = await fetch(`${PROXY}/${DB}/_nouveau/foo`, {
+      const nouveau = await fetch(`${PROXY}/${DB}/_design/app/_nouveau/foo`, {
         headers: authHeaders("jwt", aliceJwt),
       });
       expect(nouveau.status).toBe(403);
+    });
+
+    it("_all_dbs does not auto-install ACL design docs as a listing side effect", async () => {
+      const freshDb = `list-only-${suiteId}`;
+      const create = await fetch(`${PROXY}/${freshDb}`, {
+        method: "PUT",
+        headers: adminHeaders(),
+      });
+      expect(create.ok).toBe(true);
+      try {
+        const listed = await fetch(`${PROXY}/_all_dbs`, {
+          headers: authHeaders("jwt", bobJwt),
+        });
+        expect(listed.status).toBe(200);
+
+        const info = await fetch(`${PROXY}/_dbs_info`, {
+          method: "POST",
+          headers: {
+            ...adminHeaders(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ keys: [freshDb] }),
+        });
+        expect(info.status).toBe(200);
+        const dbs = (await info.json()) as Array<{ info?: { doc_count?: number } }>;
+        expect(dbs[0]?.info?.doc_count).toBe(0);
+      } finally {
+        await fetch(`${PROXY}/${freshDb}`, {
+          method: "DELETE",
+          headers: adminHeaders(),
+        });
+      }
     });
 
     it("_replicate is admin-only", async () => {

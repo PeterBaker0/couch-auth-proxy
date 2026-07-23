@@ -136,13 +136,14 @@ export const ROUTES: RouteDef[] = [
     actors: ["admin"],
   },
 
-  // —— Search / Nouveau (if enabled on Couch) — admin only ——
-  { method: "get", path: "/:db/_search/:rest{.*}", actors: ["admin"] },
-  { method: "post", path: "/:db/_search/:rest{.*}", actors: ["admin"] },
-  { method: "get", path: "/:db/_nouveau/:rest{.*}", actors: ["admin"] },
-  { method: "post", path: "/:db/_nouveau/:rest{.*}", actors: ["admin"] },
-
   // —— Design docs / views ——
+  // Search/Nouveau results can embed hits without ACL rows — admin only.
+  { method: "get", path: "/:db/_design/:ddoc/_search/:index", actors: ["admin"] },
+  { method: "post", path: "/:db/_design/:ddoc/_search/:index", actors: ["admin"] },
+  { method: "get", path: "/:db/_design/:ddoc/_search_info/:index", actors: ["admin"] },
+  { method: "get", path: "/:db/_design/:ddoc/_nouveau/:index", actors: ["admin"] },
+  { method: "post", path: "/:db/_design/:ddoc/_nouveau/:index", actors: ["admin"] },
+  { method: "get", path: "/:db/_design/:ddoc/_nouveau_info/:index", actors: ["admin"] },
   { method: "get", path: "/:db/_design/:ddoc/_view/:view", actors: ["db", "rows"] },
   { method: "post", path: "/:db/_design/:ddoc/_view/:view", actors: ["db", "rows"] },
   { method: "get", path: "/:db/_design/:ddoc/_list/:list/:view", actors: ["list501"] },
@@ -151,7 +152,9 @@ export const ROUTES: RouteDef[] = [
   { method: "post", path: "/:db/_design/:ddoc/_list/:list/:ddoc2/:view", actors: ["list501"] },
   // Show/update without a target doc can emit or mutate arbitrarily — reject.
   { method: "get", path: "/:db/_design/:ddoc/_show/:show", actors: ["unsupported"] },
+  { method: "post", path: "/:db/_design/:ddoc/_show/:show", actors: ["unsupported"] },
   { method: "get", path: "/:db/_design/:ddoc/_show/:show/:docId", actors: ["db", "doc", "pipe"] },
+  { method: "post", path: "/:db/_design/:ddoc/_show/:show/:docId", actors: ["db", "doc", "pipe"] },
   { method: "post", path: "/:db/_design/:ddoc/_update/:update", actors: ["unsupported"] },
   {
     method: "post",
@@ -164,17 +167,34 @@ export const ROUTES: RouteDef[] = [
     actors: ["db", "docUpdate", "pipe"],
   },
   { method: "get", path: "/:db/_design/:ddoc/_info", actors: ["admin"] },
+  { method: "get", path: "/:db/_design/:ddoc/_rewrite", actors: ["admin"] },
+  { method: "post", path: "/:db/_design/:ddoc/_rewrite", actors: ["admin"] },
   { method: "get", path: "/:db/_design/:ddoc/_rewrite/:rest{.*}", actors: ["admin"] },
+  { method: "post", path: "/:db/_design/:ddoc/_rewrite/:rest{.*}", actors: ["admin"] },
+
+  // Reserved design API roots are never interpreted as attachment names.
+  { method: "get", path: "/:db/_design/:ddoc/_view", actors: ["unsupported"] },
+  { method: "get", path: "/:db/_design/:ddoc/_list", actors: ["list501"] },
+  { method: "get", path: "/:db/_design/:ddoc/_show", actors: ["unsupported"] },
+  { method: "get", path: "/:db/_design/:ddoc/_update", actors: ["unsupported"] },
+  { method: "get", path: "/:db/_design/:ddoc/_search", actors: ["admin"] },
+  { method: "get", path: "/:db/_design/:ddoc/_search_info", actors: ["admin"] },
+  { method: "get", path: "/:db/_design/:ddoc/_nouveau", actors: ["admin"] },
+  { method: "get", path: "/:db/_design/:ddoc/_nouveau_info", actors: ["admin"] },
 
   { method: "get", path: "/:db/_design/:ddoc", actors: ["db", "doc", "pipe"] },
   { method: "head", path: "/:db/_design/:ddoc", actors: ["db", "doc", "pipe"] },
   { method: "put", path: "/:db/_design/:ddoc", actors: ["db", "docWrite", "pipe"] },
   { method: "delete", path: "/:db/_design/:ddoc", actors: ["db", "docDelete", "pipe"] },
   { method: "copy", path: "/:db/_design/:ddoc", actors: ["db", "copy"] },
-  { method: "get", path: "/:db/_design/:ddoc/:attachment", actors: ["db", "doc", "pipe"] },
-  { method: "head", path: "/:db/_design/:ddoc/:attachment", actors: ["db", "doc", "pipe"] },
-  { method: "put", path: "/:db/_design/:ddoc/:attachment", actors: ["db", "docWrite", "pipe"] },
-  { method: "delete", path: "/:db/_design/:ddoc/:attachment", actors: ["db", "docDelete", "pipe"] },
+  { method: "get", path: "/:db/_design/:ddoc/:attachment{.+}", actors: ["db", "doc", "pipe"] },
+  { method: "head", path: "/:db/_design/:ddoc/:attachment{.+}", actors: ["db", "doc", "pipe"] },
+  { method: "put", path: "/:db/_design/:ddoc/:attachment{.+}", actors: ["db", "docWrite", "pipe"] },
+  {
+    method: "delete",
+    path: "/:db/_design/:ddoc/:attachment{.+}",
+    actors: ["db", "docDelete", "pipe"],
+  },
 
   // —— Local docs — pipe after DB gate (Pouch checkpoints; no per-doc ACL rows) ——
   { method: "get", path: "/:db/_local/:docId", actors: ["db", "pipe"] },
@@ -187,8 +207,12 @@ export const ROUTES: RouteDef[] = [
   { method: "put", path: "/:db/:docId", actors: ["db", "docWrite", "pipe"] },
   { method: "delete", path: "/:db/:docId", actors: ["db", "docDelete", "pipe"] },
   { method: "copy", path: "/:db/:docId", actors: ["db", "copy"] },
-  { method: "get", path: "/:db/:docId/:attachment", actors: ["db", "doc", "pipe"] },
-  { method: "head", path: "/:db/:docId/:attachment", actors: ["db", "doc", "pipe"] },
-  { method: "put", path: "/:db/:docId/:attachment", actors: ["db", "docWrite", "pipe"] },
-  { method: "delete", path: "/:db/:docId/:attachment", actors: ["db", "docDelete", "pipe"] },
+  { method: "get", path: "/:db/:docId/:attachment{.+}", actors: ["db", "doc", "pipe"] },
+  { method: "head", path: "/:db/:docId/:attachment{.+}", actors: ["db", "doc", "pipe"] },
+  { method: "put", path: "/:db/:docId/:attachment{.+}", actors: ["db", "docWrite", "pipe"] },
+  {
+    method: "delete",
+    path: "/:db/:docId/:attachment{.+}",
+    actors: ["db", "docDelete", "pipe"],
+  },
 ];

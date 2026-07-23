@@ -6,10 +6,42 @@ import { loadConfig } from "../../src/config.js";
 describe("generated ACL design document", () => {
   it("leaves delete authorization to proxy r/w/d resolution", () => {
     const ddoc = buildAclDesignDoc();
-    expect(ddoc.version).toBe("2.1.0");
+    expect(ddoc.version).toBe("2.2.0");
     expect(ddoc.options.partitioned).toBe(false);
     expect(VALIDATE_DOC_UPDATE_SOURCE).not.toContain("You can't delete doc");
     expect(VALIDATE_DOC_UPDATE_SOURCE).toContain("Creator can not be changed");
+  });
+
+  it("lets role owners change readers but not retarget parent inheritance", () => {
+    const validate = Function(`return (${VALIDATE_DOC_UPDATE_SOURCE});`)() as (
+      next: Record<string, unknown>,
+      old: Record<string, unknown> | null,
+      user: { name: string; roles: string[] },
+      security: Record<string, unknown>,
+    ) => void;
+    const old = {
+      _id: "shared",
+      creator: "alice",
+      owners: ["r-writers"],
+      acl: ["u-alice"],
+      parent: "folder-a",
+    };
+    expect(() =>
+      validate(
+        { ...old, acl: ["u-alice", "u-carol"] },
+        old,
+        { name: "bob", roles: ["writers"] },
+        {},
+      ),
+    ).not.toThrow();
+
+    let denied: unknown;
+    try {
+      validate({ ...old, parent: "folder-b" }, old, { name: "bob", roles: ["writers"] }, {});
+    } catch (err) {
+      denied = err;
+    }
+    expect(denied).toEqual({ forbidden: "Parent can not be changed." });
   });
 
   it("upgrades legacy generated rules without discarding bucket policy", async () => {
@@ -57,13 +89,62 @@ describe("generated ACL design document", () => {
     expect(upgraded).toMatchObject({
       _id: "_design/acl",
       _rev: "4-old",
-      version: "2.1.0",
+      version: "2.2.0",
       acl: ["u-ops"],
       dbacl: { _r: ["r-support"] },
       restrict: { "*": ["r-members"] },
     });
     expect((upgraded.views as Record<string, unknown>).custom).toEqual(legacy.views.custom);
     expect(String(upgraded.validate_doc_update)).not.toContain("You can't delete doc");
+  });
+
+  it("upgrades generated v2.1 owner policy without replacing custom views", async () => {
+    const cache = new AclCache(
+      loadConfig({
+        COUCH_URL: "http://127.0.0.1:5984",
+        RATE_LIMIT_ENABLED: "false",
+      }),
+    );
+    let written: Record<string, unknown> | undefined;
+    cache.adminClient.fetch = vi.fn(async (_path: string, init?: RequestInit) => {
+      written = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response("{}", { status: 201 });
+    }) as typeof cache.adminClient.fetch;
+    const old = {
+      _id: "_design/acl",
+      _rev: "3-old",
+      version: "2.1.0",
+      type: "ddoc",
+      acl: [],
+      options: { local_seq: true, partitioned: false },
+      views: {
+        acl: { map: "function (doc) { emit(doc._id, doc); }" },
+        custom: { map: "function (doc) { emit(doc.kind, 1); }" },
+      },
+      validate_doc_update:
+        'function () { throw { forbidden: "Readers list can not be changed." }; }',
+    };
+
+    await (
+      cache as unknown as {
+        maybeMigrateStamp: (db: string, response: Response) => Promise<void>;
+      }
+    ).maybeMigrateStamp(
+      "docs",
+      new Response(JSON.stringify(old), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    expect(written).toMatchObject({
+      _id: "_design/acl",
+      _rev: "3-old",
+      version: "2.2.0",
+      views: old.views,
+    });
+    expect(String(written?.validate_doc_update)).toContain("roleToken");
+    expect(String(written?.validate_doc_update)).toContain("Parent can not be changed.");
   });
 
   it("adds the global-view option to early v2.1 ddocs without replacing custom code", async () => {
