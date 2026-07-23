@@ -844,7 +844,7 @@ export class AclCache {
     if (!res.body._id || res.body._deleted) return undefined;
     const doc = res.body;
     return aclRowFromDoc({
-      _id: doc._id,
+      _id: doc._id!,
       _rev: doc._rev ?? rev,
       ...(Object.hasOwn(doc, "creator") ? { creator: doc.creator } : {}),
       ...(Object.hasOwn(doc, "owners") ? { owners: doc.owners } : {}),
@@ -901,7 +901,7 @@ export class AclCache {
     if (!prevRes.body._id) return undefined;
     const doc = prevRes.body;
     return aclRowFromDoc({
-      _id: doc._id,
+      _id: doc._id!,
       _rev: prevRev,
       ...(Object.hasOwn(doc, "creator") ? { creator: doc.creator } : {}),
       ...(Object.hasOwn(doc, "owners") ? { owners: doc.owners } : {}),
