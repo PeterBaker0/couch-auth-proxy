@@ -165,4 +165,5 @@ pnpm test:integration         # needs stack up
 Pre-commit runs `oxfmt` on staged files via husky + lint-staged (`pnpm prepare` after install).
 
 Integration includes PouchDB in-memory sync (`test/integration/pouch-sync.test.ts`) and fail-closed security edges (`security-edges.test.ts`, `security-deep.test.ts`): attachments (inline/`_bulk_get`/`_changes`/unicode/Range), custom views + reduce/group rejection (query **and** POST body), keyed vs non-keyed list id-leak guards, deletion tombstones, design-doc filters + `style=all_docs`, `open_revs`/meta probes, filtered replica streams (`doc_ids` / selector / longpoll / eventsource), bulk `all_or_nothing` / `new_edits:false`, `_show`/`_update` without doc id, `_explain`/index admin-only, `_local` checkpoints, ACL revocation, and `restrict` rules.
+
 # couch-auth-proxy

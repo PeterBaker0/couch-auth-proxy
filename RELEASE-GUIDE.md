@@ -37,9 +37,9 @@ Package visibility: the default `GITHUB_TOKEN` can push images to GHCR for this 
 
 Useful flags:
 
-| Flag        | Effect                                              |
-| ----------- | --------------------------------------------------- |
-| `--dry-run` | Print the plan; change nothing                      |
+| Flag        | Effect                                               |
+| ----------- | ---------------------------------------------------- |
+| `--dry-run` | Print the plan; change nothing                       |
 | `--no-push` | Commit + tag locally only (no push / GitHub Release) |
 
 `--no-push` finish later with:
@@ -63,13 +63,13 @@ For this repository that is `ghcr.io/peterbaker0/couch-auth-proxy`.
 
 For a release tag `v2.1.3` (stable, not a pre-release), the workflow applies:
 
-| Tag         | Meaning                                      |
-| ----------- | -------------------------------------------- |
-| `2.1.3`     | Exact semver (no leading `v`)                |
-| `2.1`       | Major.minor floating tag                     |
-| `2`         | Major floating tag                           |
-| `latest`    | Latest stable release (omitted for prereleases) |
-| `sha-<short>` | Short commit SHA of the release commit     |
+| Tag           | Meaning                                         |
+| ------------- | ----------------------------------------------- |
+| `2.1.3`       | Exact semver (no leading `v`)                   |
+| `2.1`         | Major.minor floating tag                        |
+| `2`           | Major floating tag                              |
+| `latest`      | Latest stable release (omitted for prereleases) |
+| `sha-<short>` | Short commit SHA of the release commit          |
 
 Pre-releases (GitHub Release marked as pre-release, e.g. `v2.1.3-rc.1`) get the semver / major.minor / major / sha tags but **not** `latest`.
 
