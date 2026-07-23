@@ -50,7 +50,9 @@ describe("generated ACL design document", () => {
       }),
     );
 
-    expect(written).toMatchObject({
+    expect(written).toBeDefined();
+    const upgraded = written!;
+    expect(upgraded).toMatchObject({
       _id: "_design/acl",
       _rev: "4-old",
       version: "2.1.0",
@@ -58,7 +60,7 @@ describe("generated ACL design document", () => {
       dbacl: { _r: ["r-support"] },
       restrict: { "*": ["r-members"] },
     });
-    expect((written?.views as Record<string, unknown>).custom).toEqual(legacy.views.custom);
-    expect(String(written?.validate_doc_update)).not.toContain("You can't delete doc");
+    expect((upgraded.views as Record<string, unknown>).custom).toEqual(legacy.views.custom);
+    expect(String(upgraded.validate_doc_update)).not.toContain("You can't delete doc");
   });
 });
