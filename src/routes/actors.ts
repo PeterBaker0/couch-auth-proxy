@@ -472,7 +472,7 @@ export const actors: Record<string, Actor> = {
     const filtered = filterRows(state, principal, body, {
       preserveDenied: hasKeys,
     });
-    return jsonResponse(filtered, upstream.status);
+    return toClientResponse(upstream, { body: JSON.stringify(filtered) });
   },
 
   /** Proxy `_changes` and stream-filter by read ACL (all feed styles). */
@@ -497,22 +497,11 @@ export const actors: Record<string, Actor> = {
     const filtered = filterChangesStream(upstream.body, state, c.get("principal"), feed, {
       maxBufferBytes: config.server.maxBodyBytes,
     });
-    const headers = new Headers();
-    upstream.headers.forEach((value, key) => {
-      const lowerKey = key.toLowerCase();
-      if (
-        lowerKey === "content-encoding" ||
-        lowerKey === "content-length" ||
-        lowerKey === "transfer-encoding"
-      ) {
-        return;
-      }
-      headers.set(key, value);
-    });
-    if (!headers.has("Content-Type")) {
-      headers.set("Content-Type", "application/json");
+    const response = toClientResponse(upstream, { body: filtered });
+    if (!response.headers.has("Content-Type")) {
+      response.headers.set("Content-Type", "application/json");
     }
-    return new Response(filtered, { status: upstream.status, headers });
+    return response;
   },
 
   /**
@@ -573,7 +562,9 @@ export const actors: Record<string, Actor> = {
         rev: doc._rev,
       }));
     }
-    return jsonResponse(mergeBulkResults(filtered.slots, results), upstream.status);
+    return toClientResponse(upstream, {
+      body: JSON.stringify(mergeBulkResults(filtered.slots, results)),
+    });
   },
 
   /** Proxy `_bulk_get` then replace denied results with not_found. */
@@ -596,7 +587,9 @@ export const actors: Record<string, Actor> = {
       }
       throw err;
     }
-    return jsonResponse(filterBulkGet(state, c.get("principal"), body), upstream.status);
+    return toClientResponse(upstream, {
+      body: JSON.stringify(filterBulkGet(state, c.get("principal"), body)),
+    });
   },
 
   /** Filter `_revs_diff` / `_missing_revs` keys then proxy. */
@@ -615,6 +608,12 @@ export const actors: Record<string, Actor> = {
       }
       return couchError("bad_request", "Invalid format.", 400);
     }
+    const cache = c.get("aclCache");
+    await Promise.all(
+      Object.keys(body)
+        .filter((id) => validDocumentId(c, id))
+        .map((id) => ensureDocRow(cache, state, id)),
+    );
     const filtered = filterRevsObject(state, c.get("principal"), body, (id) =>
       validDocumentId(c, id),
     );
@@ -634,27 +633,25 @@ export const actors: Record<string, Actor> = {
       headers: { Accept: "application/json" },
     });
     if (!upstream.ok) return toClientResponse(upstream);
-    const dbs = (await upstream.json()) as string[];
-    if (!Array.isArray(dbs)) return jsonResponse(dbs, upstream.status);
-
     const principal = c.get("principal");
+    if (principal.admin) return toClientResponse(upstream);
+
+    const dbs = (await upstream.json()) as string[];
+    if (!Array.isArray(dbs)) {
+      return toClientResponse(upstream, { body: JSON.stringify(dbs) });
+    }
+
     const cache = c.get("aclCache");
     const visible: string[] = [];
     for (const db of dbs) {
       try {
-        const state = await cache.ensureDb(db);
-        if (!state.ready || state.error) {
-          if (principal.admin) visible.push(db);
-          continue;
-        }
-        if (dbAccessLevel(principal, state.compiledRestrict, state.noacl) > 0) {
+        const policy = await cache.inspectAccessPolicy(db);
+        if (dbAccessLevel(principal, policy.compiledRestrict, policy.noacl) > 0) {
           visible.push(db);
         }
-      } catch {
-        if (principal.admin) visible.push(db);
-      }
+      } catch {}
     }
-    return jsonResponse(visible, 200);
+    return toClientResponse(upstream, { body: JSON.stringify(visible) });
   },
 
   /** Mango `_find` — proxy then drop unread docs. */
@@ -717,7 +714,7 @@ export const actors: Record<string, Actor> = {
     if (injectedId) {
       filtered.docs = filtered.docs.map(({ _id: _injectedId, ...doc }) => doc);
     }
-    return jsonResponse(filtered, upstream.status);
+    return toClientResponse(upstream, { body: JSON.stringify(filtered) });
   },
 
   /** Mango index management — admin only. */
