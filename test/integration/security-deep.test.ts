@@ -219,6 +219,77 @@ describe("security deep edges", () => {
       };
       expect(bobSecretBody.results.map((r) => r.id)).not.toContain(ids.secretTomb);
     });
+
+    it("retains tombstone ACLs after a live ACL policy reload", async () => {
+      const get = await fetch(`${PROXY}/${DB}/_design/acl`, { headers: adminHeaders() });
+      const ddoc = (await get.json()) as Record<string, unknown> & {
+        _rev: string;
+        dbacl?: Record<string, unknown>;
+      };
+      const previous = ddoc.dbacl;
+      ddoc.dbacl = { ...previous, _r: ["u-carol"] };
+      const put = await fetch(`${PROXY}/${DB}/_design/acl`, {
+        method: "PUT",
+        headers: { ...adminHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify(ddoc),
+      });
+      expect(put.ok, `reload ACL ddoc: ${put.status} ${await put.text()}`).toBe(true);
+
+      try {
+        await waitUntil(
+          "dbacl reload applied",
+          async () =>
+            (await getDoc(DB, ids.alicePrivate, authHeaders("jwt", carolJwt))).status === 200,
+          20_000,
+        );
+
+        const changes = await fetch(`${PROXY}/${DB}/_changes?since=0&limit=500`, {
+          headers: authHeaders("jwt", bobJwt),
+        });
+        expect(changes.status).toBe(200);
+        const body = (await changes.json()) as {
+          results: Array<{ id: string; deleted?: boolean }>;
+        };
+        expect(body.results.some((row) => row.id === ids.tombstone && row.deleted === true)).toBe(
+          true,
+        );
+        expect(body.results.map((row) => row.id)).not.toContain(ids.secretTomb);
+
+        const probe = await fetch(`${PROXY}/${DB}/_revs_diff`, {
+          method: "POST",
+          headers: {
+            ...authHeaders("jwt", bobJwt),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            [ids.secretTomb]: ["9-probe"],
+            [`brand-new-${suiteId}`]: ["1-new"],
+          }),
+        });
+        expect(probe.status).toBe(200);
+        const missing = (await probe.json()) as Record<string, unknown>;
+        expect(missing[ids.secretTomb]).toBeUndefined();
+        expect(missing[`brand-new-${suiteId}`]).toBeDefined();
+      } finally {
+        const latest = await fetch(`${PROXY}/${DB}/_design/acl`, {
+          headers: adminHeaders(),
+        });
+        const current = (await latest.json()) as Record<string, unknown>;
+        if (previous === undefined) delete current.dbacl;
+        else current.dbacl = previous;
+        await fetch(`${PROXY}/${DB}/_design/acl`, {
+          method: "PUT",
+          headers: { ...adminHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify(current),
+        });
+        await waitUntil(
+          "dbacl reload cleared",
+          async () =>
+            (await getDoc(DB, ids.alicePrivate, authHeaders("jwt", carolJwt))).status === 404,
+          20_000,
+        );
+      }
+    });
   });
 
   // ── List / view key leakage ────────────────────────────────────────────

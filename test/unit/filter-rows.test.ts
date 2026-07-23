@@ -35,7 +35,7 @@ describe("filterRows", () => {
     { _id: "b", creator: "alice", acl: ["u-bob"] },
   ]);
 
-  it("strips unauthorized rows", () => {
+  it("strips unauthorized rows and unfiltered corpus metadata", () => {
     const out = filterRows(state, principal("bob"), {
       total_rows: 2,
       rows: [
@@ -44,7 +44,17 @@ describe("filterRows", () => {
       ],
     });
     expect(out.rows.map((r) => r.id)).toEqual(["b"]);
+    expect(out.total_rows).toBeUndefined();
+  });
+
+  it("preserves corpus metadata for administrators", () => {
+    const out = filterRows(state, principal("admin", ["_admin"]), {
+      total_rows: 2,
+      offset: 1,
+      rows: [{ id: "a" }, { id: "b" }],
+    });
     expect(out.total_rows).toBe(2);
+    expect(out.offset).toBe(1);
   });
 
   it("drops id-less reduce/group aggregate rows", () => {

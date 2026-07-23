@@ -134,7 +134,27 @@ export async function fetchFromCouch(
   };
   if (body) init.duplex = "half";
 
-  return fetch(url, init);
+  const response = await fetch(url, init);
+  const location = response.headers.get("location");
+  if (!location) return response;
+
+  // Couch commonly emits absolute redirects using its private upstream
+  // origin. Exposing that URL can let a client leave the ACL proxy when Couch
+  // is also reachable on an internal or development network. Preserve
+  // same-origin redirects as origin-relative client locations.
+  try {
+    const target = new URL(location, url);
+    if (target.origin !== couchBase.origin) return response;
+    const headers = new Headers(response.headers);
+    headers.set("Location", `${target.pathname}${target.search}${target.hash}`);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  } catch {
+    return response;
+  }
 }
 
 /**

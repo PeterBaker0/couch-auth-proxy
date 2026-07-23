@@ -39,6 +39,10 @@ export type DbAclState = {
   name: string;
   /** docId → ACL row */
   acl: Map<string, AclRow>;
+  /** Deleted ids whose retained rows authorize replication tombstones. */
+  tombstones?: Set<string>;
+  /** Whether current deleted winners were reconstructed after process start. */
+  tombstonesLoaded?: boolean;
   dbacl?: DbAclOverlay;
   restrict?: RestrictMap;
   compiledRestrict?: CompiledRestrict;
@@ -199,8 +203,12 @@ export class AclCache {
       });
       throw new AclUnavailableError(message);
     }
-    if (result.row) state.acl.set(docId, result.row);
-    else state.acl.delete(docId);
+    if (result.row) {
+      state.acl.set(docId, result.row);
+      state.tombstones?.delete(docId);
+      return;
+    }
+    await this.reconcileMissingAclRow(db, state, docId);
   }
 
   /**
@@ -227,6 +235,8 @@ export class AclCache {
     const state: DbAclState = this.dbs.get(db) ?? {
       name: db,
       acl: new Map(),
+      tombstones: new Set(),
+      tombstonesLoaded: false,
       noacl: false,
       ready: false,
       followerUp: false,
@@ -247,6 +257,8 @@ export class AclCache {
         // No couch-auth-proxy ACL ddoc — pass through to Couch `_security` only.
         state.noacl = true;
         state.acl.clear();
+        state.tombstones?.clear();
+        state.tombstonesLoaded = false;
         state.dbacl = undefined;
         state.restrict = undefined;
         state.compiledRestrict = undefined;
@@ -323,6 +335,7 @@ export class AclCache {
    * v2.0 used `_rev` stamps but its VDU incorrectly overrode proxy delete
    * grants from parent/dbacl; older versions also used `_local_seq`. v2.1 did
    * not recognize role owners and allowed non-creators to retarget `parent`.
+   * v2.2 allowed a writer to claim `creator` on an existing creator-less doc.
    */
   private async maybeMigrateStamp(db: string, getRes: Response): Promise<void> {
     const ddoc = (await getRes.json()) as {
@@ -351,7 +364,16 @@ export class AclCache {
       version.startsWith("2.1.") &&
       /Readers list can not be changed\./.test(validateSrc) &&
       (!/Parent can not be changed\./.test(validateSrc) || !/roleToken/.test(validateSrc));
-    if (!needsLegacyRewrite && !needsOwnerPolicyRewrite && !needsGlobalViewOption) return;
+    const needsCreatorPolicyRewrite =
+      generatedShape && version.startsWith("2.2.") && /if \(odc && odc != ndc\)/.test(validateSrc);
+    if (
+      !needsLegacyRewrite &&
+      !needsOwnerPolicyRewrite &&
+      !needsCreatorPolicyRewrite &&
+      !needsGlobalViewOption
+    ) {
+      return;
+    }
 
     const generated = buildAclDesignDoc();
     const next = needsLegacyRewrite
@@ -367,7 +389,7 @@ export class AclCache {
           views: { ...ddoc.views, acl: generated.views.acl },
           validate_doc_update: generated.validate_doc_update,
         }
-      : needsOwnerPolicyRewrite
+      : needsOwnerPolicyRewrite || needsCreatorPolicyRewrite
         ? {
             ...ddoc,
             _id: ddoc._id ?? generated._id,
@@ -416,6 +438,8 @@ export class AclCache {
     if (!ddoc.views?.acl?.map) {
       state.noacl = true;
       state.acl.clear();
+      state.tombstones?.clear();
+      state.tombstonesLoaded = false;
       return;
     }
 
@@ -451,8 +475,25 @@ export class AclCache {
       startKey = String(last.key ?? last.id);
     }
 
+    const tombstones = new Set(state.tombstones ?? []);
+    for (const id of loaded.keys()) tombstones.delete(id);
+
+    if (!state.tombstonesLoaded) {
+      await this.loadCurrentTombstones(db, loaded, tombstones);
+    } else {
+      // `_design/acl` edits trigger a live-view reload. Deleted documents are
+      // absent from that view, so retain only rows explicitly known to be
+      // tombstones instead of silently dropping replication visibility.
+      for (const id of tombstones) {
+        const retained = state.acl.get(id);
+        if (retained && !loaded.has(id)) loaded.set(id, retained);
+      }
+    }
+
     state.acl.clear();
     for (const [id, row] of loaded) state.acl.set(id, row);
+    state.tombstones = tombstones;
+    state.tombstonesLoaded = true;
     state.noacl = false;
   }
 
@@ -521,8 +562,9 @@ export class AclCache {
       }
       if (!state.acl.has(id)) {
         const recovered = await this.recoverAclFromDeletedDoc(db, id, rev);
-        if (recovered) state.acl.set(id, recovered);
+        state.acl.set(id, recovered ?? this.deniedTombstoneRow(rev));
       }
+      (state.tombstones ??= new Set()).add(id);
       // Retain last ACL grants for tombstone visibility on user _changes feeds.
       return;
     }
@@ -561,8 +603,127 @@ export class AclCache {
       });
       throw new AclUnavailableError(message);
     }
-    if (result.row) state.acl.set(id, result.row);
-    else state.acl.delete(id);
+    if (result.row) {
+      state.acl.set(id, result.row);
+      state.tombstones?.delete(id);
+    } else {
+      await this.reconcileMissingAclRow(db, state, id);
+    }
+  }
+
+  /**
+   * Distinguish a genuinely new id from a live document omitted by a broken
+   * ACL view and from a deleted winner. This prevents cold-cache create and
+   * replication probes from treating private tombstones as writable.
+   */
+  private async reconcileMissingAclRow(db: string, state: DbAclState, id: string): Promise<void> {
+    let meta;
+    try {
+      meta = await this.admin.json<{
+        rows?: Array<{
+          error?: string;
+          value?: { rev?: string; deleted?: boolean };
+        }>;
+      }>(`/${encodeURIComponent(db)}/_all_docs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keys: [id] }),
+      });
+    } catch (err) {
+      const message = `Document state unavailable in ${db}: ${String(err)}`;
+      this.markUnavailable(state, message);
+      throw new AclUnavailableError(message);
+    }
+
+    if (!meta.ok) {
+      const message = `Document state unavailable in ${db}: ${meta.status}`;
+      this.markUnavailable(state, message);
+      throw new AclUnavailableError(message);
+    }
+
+    const row = meta.body.rows?.[0];
+    if (!row || row.error === "not_found") {
+      state.acl.delete(id);
+      state.tombstones?.delete(id);
+      return;
+    }
+
+    if (row.value?.deleted) {
+      const rev = row.value.rev;
+      const recovered = await this.recoverAclFromDeletedDoc(db, id, rev);
+      state.acl.set(id, recovered ?? this.deniedTombstoneRow(rev));
+      (state.tombstones ??= new Set()).add(id);
+      return;
+    }
+
+    // The generated ACL view emits every live document. A live document with
+    // no row means the policy cannot be evaluated safely.
+    const message = `ACL view omitted live document ${id} in ${db}`;
+    this.markUnavailable(state, message);
+    throw new AclUnavailableError(message);
+  }
+
+  /**
+   * Reconstruct current deleted winners once after process start. `_changes`
+   * is paged and only deleted rows incur historical-revision lookups.
+   */
+  private async loadCurrentTombstones(
+    db: string,
+    loaded: Map<string, AclRow>,
+    tombstones: Set<string>,
+  ): Promise<void> {
+    let since = "0";
+    while (true) {
+      const res = await this.admin.json<{
+        results?: Array<{
+          id?: string;
+          deleted?: boolean;
+          changes?: Array<{ rev?: string }>;
+        }>;
+        last_seq?: string | number;
+        pending?: number;
+      }>(`/${encodeURIComponent(db)}/_changes`, {
+        query: {
+          since,
+          limit: String(ACL_VIEW_PAGE_SIZE),
+          style: "main_only",
+        },
+      });
+      if (!res.ok) {
+        throw new Error(`Deleted ACL scan unavailable in ${db}: ${res.status}`);
+      }
+
+      const results = res.body.results ?? [];
+      for (const change of results) {
+        if (!change.deleted || !change.id || change.id === "_design/acl") continue;
+        const rev = change.changes?.[0]?.rev;
+        const recovered = await this.recoverAclFromDeletedDoc(db, change.id, rev);
+        loaded.set(change.id, recovered ?? this.deniedTombstoneRow(rev));
+        tombstones.add(change.id);
+      }
+
+      const nextSince = String(res.body.last_seq ?? since);
+      if (
+        results.length === 0 ||
+        res.body.pending === 0 ||
+        results.length < ACL_VIEW_PAGE_SIZE ||
+        nextSince === since
+      ) {
+        break;
+      }
+      since = nextSince;
+    }
+  }
+
+  /** A compact fail-closed row when Couch has compacted the prior revision. */
+  private deniedTombstoneRow(rev?: string): AclRow {
+    return {
+      s: rev ?? "",
+      p: "",
+      _r: {},
+      _w: {},
+      _d: {},
+    };
   }
 
   /** Mark a DB unusable until `ensureDb` completes a fresh full reload. */
