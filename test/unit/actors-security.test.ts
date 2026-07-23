@@ -5,8 +5,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AclUnavailableError, type DbAclState } from "../../src/acl/cache.js";
 import { aclRowFromDoc } from "../../src/acl/resolve.js";
+import { compileRestrict } from "../../src/acl/restrict.js";
 import { createApp, createServices } from "../../src/app.js";
-import { buildPrincipal } from "../../src/auth/principal.js";
+import { anonymousPrincipal, buildPrincipal } from "../../src/auth/principal.js";
 import type { Principal } from "../../src/auth/types.js";
 import { loadConfig } from "../../src/config.js";
 import { toClientResponse } from "../../src/proxy/forward.js";
@@ -44,6 +45,27 @@ function appWithState(state: DbAclState, maxIdLength = 200, principal: Principal
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("database authentication gate", () => {
+  it("rejects anonymous access before forwarding ACL-backed database requests", async () => {
+    const { app } = appWithState(stateWith([]), 200, anonymousPrincipal());
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/_local/checkpoint", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({
+      error: "unauthorized",
+      reason: "Authentication required.",
+    });
+    expect(upstream).not.toHaveBeenCalled();
+  });
 });
 
 describe("single-document authorization hardening", () => {
@@ -337,6 +359,30 @@ describe("admin forwarding", () => {
     expect(upstream).toHaveBeenCalledTimes(2);
   });
 
+  it("rewrites Couch-origin redirects so clients stay on the proxy", async () => {
+    const admin = buildPrincipal({
+      ok: true,
+      userCtx: { name: "admin", roles: ["_admin"] },
+      info: { authenticated: "default" },
+    });
+    const { app } = appWithState(stateWith([]), 200, admin);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(null, {
+          status: 301,
+          headers: {
+            Location: "http://127.0.0.1:5984/docs/_design/app/_view/by_kind?reduce=false",
+          },
+        });
+      }),
+    );
+
+    const res = await app.request("http://proxy.test/docs");
+    expect(res.status).toBe(301);
+    expect(res.headers.get("location")).toBe("/docs/_design/app/_view/by_kind?reduce=false");
+  });
+
   it("strips spoofed forwarded-host headers and rewrites Couch Location", async () => {
     const { app } = appWithState(stateWith([]));
     const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -542,6 +588,24 @@ describe("COPY destination authorization", () => {
     }
     expect(upstream).not.toHaveBeenCalled();
   });
+
+  it("applies PUT method restrictions to the COPY destination", async () => {
+    const restricted = stateWith([{ _id: "source", creator: "alice", acl: ["u-bob"] }]);
+    restricted.compiledRestrict = compileRestrict({
+      put: { "*": [] },
+    });
+    const { app } = appWithState(restricted);
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/source", {
+      method: "COPY",
+      headers: { Destination: "new-document" },
+    });
+
+    expect(res.status).toBe(403);
+    expect(upstream).not.toHaveBeenCalled();
+  });
 });
 
 describe("reserved design endpoints", () => {
@@ -562,6 +626,59 @@ describe("reserved design endpoints", () => {
       expect(res.status, path).toBe(403);
     }
     expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("rejects encoded design separators before generic attachment routing", async () => {
+    const state = stateWith([{ _id: "_design/app" }, { _id: "private", creator: "alice" }]);
+    const { app } = appWithState(state);
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    for (const path of [
+      "/docs/_design%2Fapp/_view/by_kind?include_docs=true",
+      "/docs/_design/app/_view%2Fby_kind?include_docs=true",
+      "/docs/_design/app/_search%2Fby_name",
+      "/docs/_design/app/_rewrite%2Ftarget",
+    ]) {
+      const res = await app.request(`http://localhost${path}`);
+      expect(res.status, path).toBe(404);
+    }
+    expect(upstream).not.toHaveBeenCalled();
+  });
+});
+
+describe("_bulk_get cache synchronization", () => {
+  it("refreshes requested ids before filtering the Couch response", async () => {
+    const state = stateWith([]);
+    const { app, services } = appWithState(state);
+    services.aclCache.refreshDoc = vi.fn(async (_db: string, id: string) => {
+      state.acl.set(id, aclRowFromDoc({ _id: id, creator: "bob" }));
+    });
+    const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        docs: [{ id: "just-created" }, { id: "just-created" }],
+      });
+      return new Response(
+        JSON.stringify({
+          results: [{ id: "just-created", docs: [{ ok: { _id: "just-created" } }] }],
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/_bulk_get", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ docs: [{ id: "just-created" }, { id: "just-created" }] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      results: [{ id: "just-created", docs: [{ ok: { _id: "just-created" } }] }],
+    });
+    expect(services.aclCache.refreshDoc).toHaveBeenCalledWith("docs", "just-created");
+    expect(services.aclCache.refreshDoc).toHaveBeenCalledTimes(1);
   });
 });
 

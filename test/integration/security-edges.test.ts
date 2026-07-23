@@ -80,6 +80,28 @@ async function putAppView(): Promise<void> {
     }),
   });
   expect(res.ok, `put _design/app: ${res.status} ${await res.text()}`).toBe(true);
+
+  // A readable design doc is common and must not turn encoded route
+  // separators into an unfiltered attachment passthrough.
+  const publicRes = await fetch(`${PROXY}/${DB}/_design/public-app`, {
+    method: "PUT",
+    headers: { ...adminHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      _id: "_design/public-app",
+      language: "javascript",
+      views: {
+        by_kind: {
+          map: `function (doc) {
+            if (doc.kind) emit(doc.kind, 1);
+          }`,
+        },
+      },
+    }),
+  });
+  expect(
+    publicRes.ok,
+    `put _design/public-app: ${publicRes.status} ${await publicRes.text()}`,
+  ).toBe(true);
 }
 
 describe("security edge cases", () => {
@@ -384,6 +406,32 @@ describe("security edge cases", () => {
       expect(rowIds).toContain(ids.withAtt);
       expect(rowIds).not.toContain(ids.alicePrivate);
       expect(rowIds).not.toContain(ids.secretAtt);
+    });
+
+    it("rejects encoded design separators instead of piping an unfiltered view", async () => {
+      const canonical = await fetch(
+        `${PROXY}/${DB}/_design/public-app/_view/by_kind?include_docs=true`,
+        { headers: authHeaders("jwt", bobJwt) },
+      );
+      expect(canonical.status).toBe(200);
+      const canonicalBody = (await canonical.json()) as {
+        rows: Array<{ id?: string; doc?: { body?: string } }>;
+      };
+      expect(canonicalBody.rows.map((row) => row.id)).toContain(ids.bobReader);
+      expect(canonicalBody.rows.map((row) => row.id)).not.toContain(ids.alicePrivate);
+
+      for (const path of [
+        `/${DB}/_design%2Fpublic-app/_view/by_kind?include_docs=true`,
+        `/${DB}/_design/public-app/_view%2Fby_kind?include_docs=true`,
+      ]) {
+        const encoded = await fetch(`${PROXY}${path}`, {
+          headers: authHeaders("jwt", bobJwt),
+          redirect: "manual",
+        });
+        expect(encoded.status, path).toBe(404);
+        expect(await encoded.text()).not.toContain("secret");
+        expect(encoded.headers.get("location")).toBeNull();
+      }
     });
 
     it("reduce=true / group are 501 for non-admins (not aggregate leak)", async () => {
@@ -761,6 +809,23 @@ describe("security edge cases", () => {
       expect((await getDoc(DB, ids.alicePrivate, authHeaders("jwt", daveJwt))).status).toBe(404);
     });
 
+    it("a writer cannot claim creator ownership of an existing open doc", async () => {
+      const current = await getDoc(DB, ids.open, authHeaders("jwt", bobJwt));
+      expect(current.status).toBe(200);
+      const doc = (await current.json()) as Record<string, unknown>;
+      const claim = await putDoc(
+        DB,
+        ids.open,
+        { ...doc, creator: "bob" },
+        authHeaders("jwt", bobJwt),
+      );
+      expect(claim.status).toBe(403);
+      const after = (await (
+        await getDoc(DB, ids.open, authHeaders("jwt", daveJwt))
+      ).json()) as Record<string, unknown>;
+      expect(after.creator).toBeUndefined();
+    });
+
     it("owner cannot escalate by rewriting acl/owners (VDU)", async () => {
       const docRes = await getDoc(DB, ids.bobOwner, authHeaders("jwt", bobJwt));
       const doc = (await docRes.json()) as Record<string, unknown>;
@@ -1040,6 +1105,9 @@ describe("security edge cases", () => {
           // `*attachments=true` matches `...?attachments=true` exactly.
           "*attachments=true": ["u-alice"],
         },
+        put: {
+          "*": [],
+        },
       };
       const put = await fetch(`${PROXY}/${DB}/_design/acl`, {
         method: "PUT",
@@ -1072,6 +1140,15 @@ describe("security edge cases", () => {
           { headers: authHeaders("jwt", aliceJwt) },
         );
         expect(alice.status).toBe(200);
+
+        const copy = await fetch(`${PROXY}/${DB}/${encodeURIComponent(ids.bobReader)}`, {
+          method: "COPY",
+          headers: {
+            ...authHeaders("jwt", bobJwt),
+            Destination: `copy-blocked-${suiteId}`,
+          },
+        });
+        expect(copy.status).toBe(403);
       } finally {
         const again = await fetch(`${PROXY}/${DB}/_design/acl`, {
           headers: adminHeaders(),

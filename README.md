@@ -108,6 +108,7 @@ Unmapped endpoints return **404** for non-admins (default-deny). `_list`, `_show
 - Keyed document-list queries such as `_all_docs` may return `not_found` placeholders for denied ids (the caller supplied those document ids). Custom view queries always drop denied rows because a view key does not prove knowledge of the matching document ids.
 - Linked-view `include_docs` rows are authorized against both the source row and the embedded target document.
 - Principal-dependent list responses disable shared validators and caching so an old authorized representation cannot survive an ACL or role change.
+- Filtered row responses omit unfiltered `total_rows`, `offset`, and `update_seq`; Mango responses omit unfiltered execution statistics for non-admins.
 - Continuous `_changes` sequences are opaque strings (Couch 2+/3); never treat them as integers.
 - ACL cache is ~hundreds of bytes per doc per process; preload via `COUCH_PRELOAD_DBS`.
 - Initial ACL view loads are paginated; the in-memory cache still contains one compact row per document.

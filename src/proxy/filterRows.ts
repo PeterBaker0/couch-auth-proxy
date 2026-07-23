@@ -3,7 +3,7 @@
  *
  * Unauthorized docs are dropped, or (when `preserveDenied`) replaced with
  * `{ id, error: "not_found" }` so keyed POSTs keep positional alignment.
- * `total_rows` is left as Couch reported it (index size), not the filtered length.
+ * Unfiltered corpus metadata is omitted for non-admins.
  */
 import type { Principal } from "../auth/types.js";
 import type { DbAclState } from "../acl/cache.js";
@@ -64,10 +64,13 @@ export function filterRows(
       rows.push({ id: String(rowId), error: "not_found" });
     }
   }
+  if (!principal.admin) {
+    const { total_rows: _totalRows, offset: _offset, update_seq: _updateSeq, ...safeBody } = body;
+    return { ...safeBody, rows };
+  }
   return {
     ...body,
     rows,
-    // Keep Couch's total_rows (index size); do not lie that filtered length is total.
   };
 }
 
