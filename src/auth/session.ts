@@ -12,6 +12,7 @@
 import { createHash } from "node:crypto";
 import type { AppConfig } from "../config.js";
 import { LruMap } from "../util/lru.js";
+import { bearerToken, verifyJwtLocally } from "./jwt.js";
 import { anonymousPrincipal, buildPrincipal } from "./principal.js";
 import type { Principal, SessionInfo } from "./types.js";
 
@@ -35,6 +36,19 @@ export class SessionResolver {
     const auth = headers.get("authorization") ?? "";
     const cookie = headers.get("cookie") ?? "";
     if (!auth && !cookie) return anonymousPrincipal();
+
+    if (!this.config.auth.resolveViaCouchSession) {
+      if (!this.config.auth.jwt.enabled) return anonymousPrincipal();
+      const token = bearerToken(auth);
+      if (!token) return anonymousPrincipal();
+      try {
+        return await verifyJwtLocally(token, this.config);
+      } catch {
+        // Invalid/expired JWTs are anonymous for ACL purposes. Couch will
+        // independently reject the forwarded credential.
+        return anonymousPrincipal();
+      }
+    }
 
     const cacheKey = hashCreds(auth, cookie);
     const cached = this.cache.get(cacheKey);

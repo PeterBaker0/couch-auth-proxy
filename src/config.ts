@@ -18,76 +18,92 @@ const boolFromEnv = z
     typeof v === "boolean" ? v : ["1", "true", "yes", "on"].includes(v.toLowerCase()),
   );
 
-const ConfigSchema = z.object({
-  server: z.object({
-    host: z.string().default("0.0.0.0"),
-    port: z.coerce.number().int().positive().default(8000),
-    mount: z.string().default("/"),
-    maxBodyBytes: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(50 * 1024 * 1024),
-    /** Graceful shutdown drain before force-exit (ms). */
-    shutdownTimeoutMs: z.coerce.number().int().positive().default(10_000),
-    /**
-     * Number of trusted reverse-proxy hops for client IP (rate limit).
-     * 0 = ignore X-Forwarded-For / X-Real-IP (recommended unless behind a known proxy).
-     */
-    trustProxyHops: z.coerce.number().int().nonnegative().default(0),
-  }),
-  couch: z.object({
-    /** Public Couch URL used for proxying client requests (no credentials). */
-    url: z.string().url(),
-    /** Admin-capable URL for ACL views, ddoc install, _users follow, etc. */
-    adminUrl: z.string().url(),
-    usersDb: z.string().default("_users"),
-    maxIdLength: z.coerce.number().int().positive().default(200),
-    sessionCacheTtlMs: z.coerce.number().int().nonnegative().default(30_000),
-    /** Max hashed session-cache entries (LRU). */
-    sessionCacheMaxEntries: z.coerce.number().int().positive().default(10_000),
-    preloadDbs: z.array(z.string()).default([]),
-    /**
-     * When true, missing `_design/acl` on app DBs is auto-installed.
-     * System DBs (`_users`, etc.) are never auto-installed.
-     * Set false in production if ddocs are provisioned out-of-band.
-     */
-    aclAutoInstall: boolFromEnv.default(true),
-  }),
-  auth: z.object({
-    /**
-     * Prefer resolving identity via CouchDB GET /_session with forwarded
-     * Authorization/Cookie headers (JWT/cookie/basic parity with Couch).
-     */
-    resolveViaCouchSession: boolFromEnv.default(true),
-    /**
-     * Optional local JWT verification using the same keys Couch trusts.
-     * Only used when resolveViaCouchSession is false, or as a future cache.
-     */
-    jwt: z
-      .object({
-        enabled: boolFromEnv.default(false),
-        /** HS256 secret (raw string). Prefer env; keep in sync with Couch [jwt_keys]. */
-        hmacSecret: z.string().optional(),
-        /** Claim path for roles; Couch default is _couchdb.roles */
-        rolesClaimPath: z.string().default("_couchdb.roles"),
-        requiredClaims: z.array(z.string()).default(["exp"]),
-      })
-      .default({}),
-  }),
-  cors: z.object({
-    /** Empty allowlist disables CORS reflection (same-origin only). */
-    origins: z.array(z.string()).default([]),
-    allowCredentials: boolFromEnv.default(true),
-  }),
-  rateLimit: z.object({
-    enabled: boolFromEnv.default(true),
-    windowMs: z.coerce.number().int().positive().default(1000),
-    maxRequests: z.coerce.number().int().positive().default(100),
-    perIpWindowMs: z.coerce.number().int().positive().default(10_000),
-    perIpMaxRequests: z.coerce.number().int().positive().default(100),
-  }),
-});
+const ConfigSchema = z
+  .object({
+    server: z.object({
+      host: z.string().default("0.0.0.0"),
+      port: z.coerce.number().int().positive().default(8000),
+      maxBodyBytes: z.coerce
+        .number()
+        .int()
+        .positive()
+        .default(50 * 1024 * 1024),
+      /** Graceful shutdown drain before force-exit (ms). */
+      shutdownTimeoutMs: z.coerce.number().int().positive().default(10_000),
+      /**
+       * Number of trusted reverse-proxy hops for client IP (rate limit).
+       * 0 = ignore X-Forwarded-For / X-Real-IP (recommended unless behind a known proxy).
+       */
+      trustProxyHops: z.coerce.number().int().nonnegative().default(0),
+    }),
+    couch: z.object({
+      /** Public Couch URL used for proxying client requests (no credentials). */
+      url: z.string().url(),
+      /** Admin-capable URL for ACL views, ddoc install, _users follow, etc. */
+      adminUrl: z.string().url(),
+      usersDb: z.string().default("_users"),
+      maxIdLength: z.coerce.number().int().positive().default(200),
+      sessionCacheTtlMs: z.coerce.number().int().nonnegative().default(30_000),
+      /** Max hashed session-cache entries (LRU). */
+      sessionCacheMaxEntries: z.coerce.number().int().positive().default(10_000),
+      preloadDbs: z.array(z.string()).default([]),
+      /**
+       * When true, missing `_design/acl` on app DBs is auto-installed.
+       * System DBs (`_users`, etc.) are never auto-installed.
+       * Set false in production if ddocs are provisioned out-of-band.
+       */
+      aclAutoInstall: boolFromEnv.default(true),
+    }),
+    auth: z.object({
+      /**
+       * Prefer resolving identity via CouchDB GET /_session with forwarded
+       * Authorization/Cookie headers (JWT/cookie/basic parity with Couch).
+       */
+      resolveViaCouchSession: boolFromEnv.default(true),
+      /**
+       * Optional local JWT verification using the same keys Couch trusts.
+       * Only used when resolveViaCouchSession is false, or as a future cache.
+       */
+      jwt: z
+        .object({
+          enabled: boolFromEnv.default(false),
+          /** HS256 secret (raw string). Prefer env; keep in sync with Couch [jwt_keys]. */
+          hmacSecret: z.string().optional(),
+          /** Claim path for roles; escaped dot matches Couch's `_couchdb.roles` key. */
+          rolesClaimPath: z.string().default("_couchdb\\.roles"),
+          requiredClaims: z.array(z.string()).default(["exp"]),
+        })
+        .default({}),
+    }),
+    cors: z.object({
+      /** Empty allowlist disables CORS reflection (same-origin only). */
+      origins: z.array(z.string()).default([]),
+      allowCredentials: boolFromEnv.default(true),
+    }),
+    rateLimit: z.object({
+      enabled: boolFromEnv.default(true),
+      windowMs: z.coerce.number().int().positive().default(1000),
+      maxRequests: z.coerce.number().int().positive().default(100),
+      perIpWindowMs: z.coerce.number().int().positive().default(10_000),
+      perIpMaxRequests: z.coerce.number().int().positive().default(100),
+    }),
+  })
+  .superRefine((config, ctx) => {
+    if (!config.auth.resolveViaCouchSession && !config.auth.jwt.enabled) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["auth", "jwt", "enabled"],
+        message: "JWT_LOCAL_VERIFY must be enabled when AUTH_RESOLVE_VIA_COUCH_SESSION is false",
+      });
+    }
+    if (config.auth.jwt.enabled && !config.auth.jwt.hmacSecret) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["auth", "jwt", "hmacSecret"],
+        message: "JWT_HMAC_SECRET is required when JWT_LOCAL_VERIFY is enabled",
+      });
+    }
+  });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
 
@@ -121,7 +137,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     server: {
       host: env.HOST ?? "0.0.0.0",
       port: env.PORT ?? 8000,
-      mount: env.MOUNT ?? "/",
       maxBodyBytes: env.MAX_BODY_BYTES ?? 50 * 1024 * 1024,
       shutdownTimeoutMs: env.SHUTDOWN_TIMEOUT_MS ?? 10_000,
       trustProxyHops: env.TRUST_PROXY_HOPS ?? 0,
@@ -141,7 +156,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       jwt: {
         enabled: env.JWT_LOCAL_VERIFY ?? false,
         hmacSecret: env.JWT_HMAC_SECRET,
-        rolesClaimPath: env.JWT_ROLES_CLAIM_PATH ?? "_couchdb.roles",
+        rolesClaimPath: env.JWT_ROLES_CLAIM_PATH ?? "_couchdb\\.roles",
         requiredClaims: splitCsv(env.JWT_REQUIRED_CLAIMS ?? "exp"),
       },
     },
