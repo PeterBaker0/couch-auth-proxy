@@ -18,6 +18,9 @@ import { requestLog } from "./middleware/requestLog.js";
 import { bodyLimit } from "./middleware/bodyLimit.js";
 import { registerRoutes } from "./routes/register.js";
 import { jsonResponse } from "./proxy/forward.js";
+import { createLogger } from "./util/log.js";
+
+const log = createLogger("app");
 
 /** Long-lived dependencies shared across all requests. */
 export type AppServices = {
@@ -125,6 +128,7 @@ export function createApp(services: AppServices): Hono<AppEnv> {
       return jsonResponse({ error: "service_unavailable", reason: "ACL cache unavailable" }, 503);
     }
     if (err instanceof HTTPException) return err.getResponse();
+    log.error("unhandled request error", { err: String(err) });
     return jsonResponse({ error: "internal_server_error", reason: "Internal server error" }, 500);
   });
 

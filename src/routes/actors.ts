@@ -176,6 +176,12 @@ export const actors: Record<string, Actor> = {
     }
 
     const principal = c.get("principal");
+    if (!state.noacl && !principal.name && !principal.admin) {
+      // ACL-backed databases only define grants for authenticated principals
+      // (`r-*`, users, and roles). Reject before forwarding body streams so
+      // Couch membership and local-document surfaces cannot bypass that rule.
+      return couchError("unauthorized", "Authentication required.", 401);
+    }
     const level = dbAccessLevel(principal, state.compiledRestrict, state.noacl);
     if (level === 0) {
       // Hide restricted DBs as not_found (same as missing).
