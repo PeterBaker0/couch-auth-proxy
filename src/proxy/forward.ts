@@ -190,8 +190,10 @@ export function toClientResponse(
       if (parsed.origin === options.rewriteLocation.fromOrigin) {
         responseHeaders.set(
           "location",
-          new URL(`${parsed.pathname}${parsed.search}${parsed.hash}`, options.rewriteLocation.toOrigin)
-            .href,
+          new URL(
+            `${parsed.pathname}${parsed.search}${parsed.hash}`,
+            options.rewriteLocation.toOrigin,
+          ).href,
         );
       }
     } catch {

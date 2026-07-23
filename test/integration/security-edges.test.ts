@@ -792,12 +792,7 @@ describe("security edge cases", () => {
       );
       expect(claim.status).toBeGreaterThanOrEqual(400);
 
-      const close = await putDoc(
-        DB,
-        ids.open,
-        { ...doc, acl: [] },
-        authHeaders("jwt", bobJwt),
-      );
+      const close = await putDoc(DB, ids.open, { ...doc, acl: [] }, authHeaders("jwt", bobJwt));
       expect(close.status).toBeGreaterThanOrEqual(400);
       expect((await getDoc(DB, ids.open, authHeaders("jwt", daveJwt))).status).toBe(200);
     });
@@ -965,9 +960,7 @@ describe("security edge cases", () => {
 
       const parent = await getDoc(DB, parentId, authHeaders("jwt", bobJwt));
       const parentRev = ((await parent.json()) as { _rev: string })._rev;
-      expect(
-        (await deleteDoc(DB, parentId, parentRev, authHeaders("jwt", bobJwt))).ok,
-      ).toBe(true);
+      expect((await deleteDoc(DB, parentId, parentRev, authHeaders("jwt", bobJwt))).ok).toBe(true);
       await waitUntil("deleted parent stops granting child access", async () => {
         return (await getDoc(DB, childId, authHeaders("jwt", bobJwt))).status === 404;
       });

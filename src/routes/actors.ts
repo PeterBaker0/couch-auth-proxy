@@ -609,11 +609,7 @@ export const actors: Record<string, Actor> = {
     if (!upstream.ok) return toClientResponse(upstream);
     let results = (await upstream.json()) as Array<Record<string, unknown>>;
     if (!Array.isArray(results)) results = [];
-    results = normalizeBulkResults(
-      filtered.allowed,
-      results,
-      String(body.new_edits) === "false",
-    );
+    results = normalizeBulkResults(filtered.allowed, results, String(body.new_edits) === "false");
     for (let i = 0; i < filtered.allowed.length; i++) {
       const doc = filtered.allowed[i];
       const result = results[i];
@@ -622,10 +618,7 @@ export const actors: Record<string, Actor> = {
         const retained = state.acl.get(doc._id);
         if (retained) state.acl.set(doc._id, { ...retained, deleted: true });
       } else {
-        state.acl.set(
-          doc._id,
-          aclRowFromDoc(doc as Parameters<typeof aclRowFromDoc>[0]),
-        );
+        state.acl.set(doc._id, aclRowFromDoc(doc as Parameters<typeof aclRowFromDoc>[0]));
       }
     }
     return toClientResponse(upstream, {

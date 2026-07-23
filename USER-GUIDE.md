@@ -98,7 +98,7 @@ Auth is Couch-native (`POST /_session`, cookie, Basic, or Bearer JWT validated b
 | Token                      | Meaning                                                  |
 | -------------------------- | -------------------------------------------------------- |
 | `u-<name>` / bare `<name>` | That user (`sub` / session name)                         |
-| `r-<role>`                  | That Couch role (from JWT roles claim or `_users` roles) |
+| `r-<role>`                 | That Couch role (from JWT roles claim or `_users` roles) |
 | `r-*`                      | Any **authenticated** DB user (not anonymous)If          |
 | `_admin` role              | Server admin — full bypass                               |
 

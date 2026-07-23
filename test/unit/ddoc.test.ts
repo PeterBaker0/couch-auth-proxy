@@ -59,9 +59,7 @@ describe("generated ACL design document", () => {
     expect(() =>
       validate({ ...open, creator: "bob" }, open, { name: "bob", roles: [] }, {}),
     ).toThrow();
-    expect(() =>
-      validate({ ...open, acl: [] }, open, { name: "bob", roles: [] }, {}),
-    ).toThrow();
+    expect(() => validate({ ...open, acl: [] }, open, { name: "bob", roles: [] }, {})).toThrow();
     expect(() =>
       validate({ _id: "new", acl: "bob" }, null, { name: "bob", roles: [] }, {}),
     ).toThrow();

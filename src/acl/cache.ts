@@ -366,35 +366,36 @@ export class AclCache {
     }
 
     const generated = buildAclDesignDoc();
-    const next = needsLegacyRewrite || needsV22PolicyRewrite
-      ? {
-          ...ddoc,
-          _id: ddoc._id ?? generated._id,
-          _rev: ddoc._rev,
-          language: generated.language,
-          options: { ...ddoc.options, ...generated.options },
-          type: generated.type,
-          version: generated.version,
-          stamp: generated.stamp,
-          views: { ...ddoc.views, acl: generated.views.acl },
-          validate_doc_update: generated.validate_doc_update,
-        }
-      : needsOwnerPolicyRewrite
+    const next =
+      needsLegacyRewrite || needsV22PolicyRewrite
         ? {
             ...ddoc,
             _id: ddoc._id ?? generated._id,
             _rev: ddoc._rev,
+            language: generated.language,
             options: { ...ddoc.options, ...generated.options },
             type: generated.type,
             version: generated.version,
             stamp: generated.stamp,
+            views: { ...ddoc.views, acl: generated.views.acl },
             validate_doc_update: generated.validate_doc_update,
           }
-        : {
-            ...ddoc,
-            options: { ...ddoc.options, partitioned: false },
-            stamp: generated.stamp,
-          };
+        : needsOwnerPolicyRewrite
+          ? {
+              ...ddoc,
+              _id: ddoc._id ?? generated._id,
+              _rev: ddoc._rev,
+              options: { ...ddoc.options, ...generated.options },
+              type: generated.type,
+              version: generated.version,
+              stamp: generated.stamp,
+              validate_doc_update: generated.validate_doc_update,
+            }
+          : {
+              ...ddoc,
+              options: { ...ddoc.options, partitioned: false },
+              stamp: generated.stamp,
+            };
     const put = await this.admin.fetch(`/${encodeURIComponent(db)}/_design/acl`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
