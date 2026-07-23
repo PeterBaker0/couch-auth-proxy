@@ -78,7 +78,7 @@ Spoofed `X-Auth-CouchDB-*` headers from clients are stripped.
 | --------- | --------------------------------------------------------------- |
 | `creator` | Full r/w/d (`"alice"` or `"u-alice"`); immutable for non-admins |
 | `owners`  | r/w; cannot delete or change creator/owners                     |
-| `acl`     | read (+ `_update` handlers use **read**, not write)             |
+| `acl`     | read only                                                       |
 | `parent`  | inherit parent ACL (most permissive wins)                       |
 
 Missing `creator` / `owners` / `acl` → open to `r-*` (**authenticated** DB users). Anonymous callers do not receive `r-*`. Design docs default read-only for `r-*`.
@@ -101,6 +101,7 @@ Unmapped endpoints return **404** for non-admins (default-deny). `_list`, `_show
 
 - After ACL filtering, `limit` may under-deliver rows — prefer `key` / `keys` queries when counts matter.
 - View `reduce` / `group` is **501** for non-admins (aggregates have no doc ids to ACL-filter), including when requested in a POST body. Use `reduce=false`, or call as admin. Non-admin view requests force `reduce=false` upstream.
+- Targeted `_update` handlers require read, write, and delete on the document because a handler may emit arbitrary updates or tombstones. Handlers without a target document are **501**.
 - Deletion tombstones stay visible on `_changes` to principals who could read the doc (last ACL retained / recovered from the pre-delete revision). Users who never had read access do not see tombstones (no existence leak).
 - Keyed `_all_docs` / view queries may return `not_found` placeholders for denied ids (positional alignment). Non-keyed listings **drop** denied rows — never emit placeholders that would leak foreign ids.
 - Continuous `_changes` sequences are opaque strings (Couch 2+/3); never treat them as integers.

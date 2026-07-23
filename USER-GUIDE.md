@@ -144,7 +144,7 @@ These are ordinary JSON fields—not a separate doc type. The `_design/acl` map 
 | --------- | ---------------------------------------------------------------------------------------------------------------- |
 | `creator` | Full **r / w / d**. Set at create time to the current user (`"alice"` or `"u-alice"`). Immutable for non-admins. |
 | `owners`  | **r / w** (not delete). May not change `creator` / `owners`. May change `acl` (readers).                         |
-| `acl`     | **read** only. Also the capability checked for `_update` handlers (read, not write).                             |
+| `acl`     | **read** only.                                                                                                   |
 | `parent`  | Doc id whose ACL is **unioned** (most permissive wins). One level of parent is used.                             |
 
 **Defaults when none of `creator` / `owners` / `acl` are present:** open **r/w/d** to `r-*` (any authenticated member).
@@ -158,7 +158,7 @@ These are ordinary JSON fields—not a separate doc type. The `_design/acl` map 
 | **`_design/acl`**     | Control plane: ACL view, `validate_doc_update`, optional `dbacl` / `restrict`. Typically `acl: []` so non-admins cannot read the body.                                                                 |
 | **Other `_design/*`** | App views, filters, etc. With no grant fields → **read-only** for `r-*`. Non-admins cannot write/delete design docs through the proxy. Use `acl: []` (or explicit grants) if a ddoc must stay private. |
 
-Unsupported / unsafe for non-admins: `_list`, `_show` / `_update` without a doc id, view `reduce`/`group` → **501**. Prefer filtered views or Mango `_find`.
+Unsupported / unsafe for non-admins: `_list`, `_show` / `_update` without a doc id, view `reduce`/`group` → **501**. Targeted `_update` handlers require r/w/d because their output can update or delete the document. Prefer filtered views or Mango `_find`.
 
 ### Local docs (`_local/…`)
 

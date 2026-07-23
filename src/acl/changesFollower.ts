@@ -102,7 +102,7 @@ export class ChangesFollower {
     const res = await this.admin.fetch(`/${encodeURIComponent(this.db)}/_changes`, {
       query: {
         feed: "continuous",
-        heartbeat: "10000",
+        heartbeat: "1000",
         since: this.since,
         style: "main_only",
       },
@@ -113,22 +113,30 @@ export class ChangesFollower {
       throw new Error(`_changes ${this.db}: ${res.status}`);
     }
 
-    // Connection established — clear follower-down fail-closed (incl. reconnect).
-    this.handlers.onUp?.();
-
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let caughtUp = false;
 
     while (this.running) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        throw new Error(`_changes ${this.db}: feed ended`);
+      }
       buffer += decoder.decode(value, { stream: true });
       let newlineIndex: number;
       while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, newlineIndex).trim();
         buffer = buffer.slice(newlineIndex + 1);
-        if (!line) continue; // heartbeat
+        if (!line) {
+          // Couch writes queued changes before the first heartbeat. Treat that
+          // heartbeat as the catch-up barrier for the snapshot loaded earlier.
+          if (!caughtUp) {
+            caughtUp = true;
+            this.handlers.onUp?.();
+          }
+          continue;
+        }
         let obj: {
           id?: string;
           seq?: string | number;
@@ -146,14 +154,16 @@ export class ChangesFollower {
           continue;
         }
         if (obj.id == null || obj.seq == null) continue;
-        this.since = String(obj.seq);
+        const nextSeq = String(obj.seq);
         const rev = typeof obj.changes?.[0]?.rev === "string" ? obj.changes[0].rev : undefined;
         await this.handlers.onChange({
           id: obj.id,
-          seq: this.since,
+          seq: nextSeq,
           deleted: !!obj.deleted,
           rev,
         });
+        // Never skip a failed ACL refresh on reconnect.
+        this.since = nextSeq;
       }
     }
   }

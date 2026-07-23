@@ -57,9 +57,14 @@ export function filterBulkDocs(
       hadDenied = true;
       continue;
     }
-    if (!doc._id) {
+    if (!Object.hasOwn(doc, "_id")) {
       allowed.push(doc);
       slots.push(null);
+      continue;
+    }
+    if (typeof doc._id !== "string" || !doc._id) {
+      slots.push({ error: "bad_request", reason: "Document id must be a non-empty string." });
+      hadDenied = true;
       continue;
     }
     const permitted =

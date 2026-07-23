@@ -145,7 +145,14 @@ export class AclCache {
   async refreshDoc(db: string, docId: string): Promise<void> {
     const state = this.dbs.get(db);
     if (!state || state.noacl) return;
-    const result = await fetchAclRow(this.admin, db, docId);
+    let result;
+    try {
+      result = await fetchAclRow(this.admin, db, docId);
+    } catch (err) {
+      const message = `ACL row unavailable in ${db}: ${String(err)}`;
+      this.markUnavailable(state, message);
+      throw new AclUnavailableError(message);
+    }
     if (!result.ok) {
       const message = `ACL row unavailable in ${db}: ${result.status}`;
       this.markUnavailable(state, message);
@@ -285,15 +292,22 @@ export class AclCache {
       _id?: string;
       _rev?: string;
       version?: string;
+      type?: string;
+      acl?: unknown;
       options?: Record<string, unknown>;
       views?: Record<string, unknown> & { acl?: { map?: string } };
       validate_doc_update?: string;
       [key: string]: unknown;
     };
     const mapSrc = ddoc.views?.acl?.map ?? "";
+    const knownGeneratedVersion =
+      ddoc.type === "ddoc" &&
+      Array.isArray(ddoc.acl) &&
+      typeof ddoc.version === "string" &&
+      /^(?:1\.|2\.0\.)/.test(ddoc.version);
     const usesLocalSeq = /_local_seq/.test(mapSrc) && !/doc\._rev/.test(mapSrc);
     const hasLegacyDeleteRule = /You can't delete doc\./.test(ddoc.validate_doc_update ?? "");
-    if (!usesLocalSeq && !hasLegacyDeleteRule) return;
+    if (!knownGeneratedVersion || (!usesLocalSeq && !hasLegacyDeleteRule)) return;
 
     const generated = buildAclDesignDoc();
     const next = {
@@ -314,7 +328,7 @@ export class AclCache {
       body: JSON.stringify(next),
     });
     if (!put.ok) {
-      log.warn("ddoc migrate skipped", { db, status: put.status });
+      throw new Error(`Failed to upgrade _design/acl in ${db}: ${put.status}`);
     } else {
       log.info("upgraded _design/acl", { db, version: generated.version });
     }
@@ -437,10 +451,10 @@ export class AclCache {
         try {
           await this.loadAll(db, state);
         } catch (err) {
-          state.ready = false;
-          state.error = String(err);
           state.noacl = false;
+          this.markUnavailable(state, String(err));
           log.warn("reload after acl ddoc delete failed", { db, err: String(err) });
+          throw new AclUnavailableError(String(err));
         }
         return;
       }
@@ -458,15 +472,22 @@ export class AclCache {
         state.error = undefined;
         state.ready = true;
       } catch (err) {
-        state.ready = false;
-        state.error = String(err);
         state.noacl = false;
+        this.markUnavailable(state, String(err));
         log.warn("reload acl ddoc failed", { db, err: String(err) });
+        throw new AclUnavailableError(String(err));
       }
       return;
     }
 
-    const result = await fetchAclRow(this.admin, db, id);
+    let result;
+    try {
+      result = await fetchAclRow(this.admin, db, id);
+    } catch (err) {
+      const message = `ACL row refresh failed in ${db}: ${String(err)}`;
+      this.markUnavailable(state, message);
+      throw new AclUnavailableError(message);
+    }
     if (!result.ok) {
       // Retain the row for a later full reload, but stop authorizing from stale
       // state. Throwing also makes the follower reconnect and report itself down.

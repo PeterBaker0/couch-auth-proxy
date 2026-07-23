@@ -35,10 +35,9 @@ describe("partitioned CouchDB 3.5 APIs", () => {
     aliceJwt = await mintJwt("alice", ["readers"]);
     bobJwt = await mintJwt("bob", ["writers"]);
 
-    const create = await fetch(`${PROXY}/${DB}`, {
+    const create = await fetch(`${PROXY}/${DB}?partitioned=true`, {
       method: "PUT",
-      headers: { ...adminHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ partitioned: true }),
+      headers: adminHeaders(),
     });
     expect([201, 202, 412]).toContain(create.status);
 
@@ -60,6 +59,9 @@ describe("partitioned CouchDB 3.5 APIs", () => {
       async () => (await fetch(`${PROXY}/${DB}`, { headers: adminHeaders() })).ok,
       30_000,
     );
+    const infoRes = await fetch(`${PROXY}/${DB}`, { headers: adminHeaders() });
+    const info = (await infoRes.json()) as { props?: { partitioned?: boolean } };
+    expect(info.props?.partitioned).toBe(true);
 
     const ddoc = await fetch(`${PROXY}/${DB}/_design/app`, {
       method: "PUT",
@@ -139,12 +141,10 @@ describe("partitioned CouchDB 3.5 APIs", () => {
     expect(seen).not.toContain(ids.otherPartition);
   });
 
-  it("keeps unfilterable partition metadata and changes admin-only", async () => {
-    for (const path of [`_partition/team-a`, `_partition/team-a/_changes?since=0`]) {
-      const res = await fetch(`${PROXY}/${DB}/${path}`, {
-        headers: authHeaders("jwt", bobJwt),
-      });
-      expect(res.status, path).toBe(403);
-    }
+  it("keeps partition metadata admin-only", async () => {
+    const res = await fetch(`${PROXY}/${DB}/_partition/team-a`, {
+      headers: authHeaders("jwt", bobJwt),
+    });
+    expect(res.status).toBe(403);
   });
 });

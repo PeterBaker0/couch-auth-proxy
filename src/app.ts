@@ -8,6 +8,7 @@
  */
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { HTTPException } from "hono/http-exception";
 import type { AppConfig } from "./config.js";
 import { AclCache, AclUnavailableError } from "./acl/cache.js";
 import { SessionResolver } from "./auth/session.js";
@@ -123,7 +124,8 @@ export function createApp(services: AppServices): Hono<AppEnv> {
     if (err instanceof AclUnavailableError) {
       return jsonResponse({ error: "service_unavailable", reason: "ACL cache unavailable" }, 503);
     }
-    throw err;
+    if (err instanceof HTTPException) return err.getResponse();
+    return jsonResponse({ error: "internal_server_error", reason: "Internal server error" }, 500);
   });
 
   return app;

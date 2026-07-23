@@ -82,6 +82,74 @@ describe("single-document authorization hardening", () => {
     expect(res.status).toBe(404);
     expect(upstream).not.toHaveBeenCalled();
   });
+
+  it("requires delete permission for a PUT tombstone", async () => {
+    const state = stateWith([{ _id: "owned", creator: "alice", owners: ["u-bob"] }]);
+    const { app } = appWithState(state);
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/owned", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ _id: "owned", _rev: "2-old", _deleted: true }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("requires write and delete permission for design update handlers", async () => {
+    const state = stateWith([{ _id: "shared", creator: "alice", acl: ["u-bob"] }]);
+    const { app } = appWithState(state);
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/_design/app/_update/touch/shared", {
+      method: "POST",
+    });
+
+    expect(res.status).toBe(403);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+});
+
+describe("_bulk_docs input validation", () => {
+  it("rejects a non-array docs envelope without throwing", async () => {
+    const { app } = appWithState(stateWith([]));
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/_bulk_docs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ docs: null }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("returns a per-document error for a non-string id", async () => {
+    const { app } = appWithState(stateWith([]));
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/_bulk_docs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ docs: [{ _id: 42, value: "invalid" }] }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual([
+      {
+        error: "bad_request",
+        reason: "Document id must be a non-empty string.",
+      },
+    ]);
+    expect(upstream).not.toHaveBeenCalled();
+  });
 });
 
 describe("COPY destination authorization", () => {
@@ -158,5 +226,38 @@ describe("Mango field projection", () => {
       bookmark: "next",
     });
     expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("preserves Couch's all-fields behavior for an empty fields array", async () => {
+    const state = stateWith([
+      { _id: "private", creator: "alice" },
+      { _id: "shared", creator: "alice", acl: ["u-bob"] },
+    ]);
+    const { app } = appWithState(state);
+    const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { fields: string[] };
+      expect(request.fields).toEqual([]);
+      return new Response(
+        JSON.stringify({
+          docs: [
+            { _id: "private", kind: "secret" },
+            { _id: "shared", kind: "visible" },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/_find", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ selector: {}, fields: [] }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      docs: [{ _id: "shared", kind: "visible" }],
+    });
   });
 });

@@ -7,6 +7,7 @@ describe("generated ACL design document", () => {
   it("leaves delete authorization to proxy r/w/d resolution", () => {
     const ddoc = buildAclDesignDoc();
     expect(ddoc.version).toBe("2.1.0");
+    expect(ddoc.options.partitioned).toBe(false);
     expect(VALIDATE_DOC_UPDATE_SOURCE).not.toContain("You can't delete doc");
     expect(VALIDATE_DOC_UPDATE_SOURCE).toContain("Creator can not be changed");
   });
@@ -28,6 +29,7 @@ describe("generated ACL design document", () => {
       _id: "_design/acl",
       _rev: "4-old",
       version: "2.0.0",
+      type: "ddoc",
       acl: ["u-ops"],
       dbacl: { _r: ["r-support"] },
       restrict: { "*": ["r-members"] },

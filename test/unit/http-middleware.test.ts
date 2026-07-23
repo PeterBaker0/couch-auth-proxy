@@ -45,4 +45,25 @@ describe("HTTP compatibility middleware", () => {
     expect(headers).toContain("range");
     expect(headers).toContain("x-couch-full-commit");
   });
+
+  it("returns an opaque 500 response for unexpected middleware failures", async () => {
+    const config = loadConfig({
+      COUCH_URL: "http://127.0.0.1:5984",
+      RATE_LIMIT_ENABLED: "false",
+    });
+    const services = createServices(config);
+    services.sessions.resolve = async () => {
+      throw new Error("credential backend detail");
+    };
+    const app = createApp(services);
+
+    const res = await app.request("http://localhost/_couch-auth-proxy/health", {
+      headers: { Authorization: "Bearer invalid" },
+    });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({
+      error: "internal_server_error",
+      reason: "Internal server error",
+    });
+  });
 });

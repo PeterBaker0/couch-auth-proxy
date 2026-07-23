@@ -620,7 +620,7 @@ describe("security edge cases", () => {
       expect(body.id).toBe(ids.bobReader);
     });
 
-    it("_update with unread docId is 404; reader may invoke on readable doc", async () => {
+    it("_update with unread docId is 404; reader cannot invoke mutating handler", async () => {
       const denied = await fetch(
         `${PROXY}/${DB}/_design/app/_update/touch/${encodeURIComponent(ids.alicePrivate)}`,
         { method: "POST", headers: authHeaders("jwt", bobJwt) },
@@ -631,9 +631,8 @@ describe("security edge cases", () => {
         `${PROXY}/${DB}/_design/app/_update/touch/${encodeURIComponent(ids.bobReader)}`,
         { method: "POST", headers: authHeaders("jwt", bobJwt) },
       );
-      // update handlers authorize with READ by design; Couch applies the mutation
-      expect(allowed.status).toBeGreaterThanOrEqual(200);
-      expect(allowed.status).toBeLessThan(300);
+      // Update handlers may write or delete arbitrary output, so read alone is insufficient.
+      expect(allowed.status).toBe(403);
     });
 
     it("_explain is admin-only (no index metadata leak)", async () => {
@@ -739,6 +738,21 @@ describe("security edge cases", () => {
       expect(res.status).toBeGreaterThanOrEqual(400);
       const carol = await getDoc(DB, ids.bobOwner, authHeaders("jwt", carolJwt));
       expect(carol.status).toBe(404);
+    });
+
+    it("owner cannot bypass delete ACL with a PUT tombstone", async () => {
+      const docRes = await getDoc(DB, ids.bobOwner, authHeaders("jwt", bobJwt));
+      const doc = (await docRes.json()) as Record<string, unknown>;
+      const res = await fetch(`${PROXY}/${DB}/${encodeURIComponent(ids.bobOwner)}`, {
+        method: "PUT",
+        headers: {
+          ...authHeaders("jwt", bobJwt),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ...doc, _deleted: true }),
+      });
+      expect(res.status).toBe(403);
+      expect((await getDoc(DB, ids.bobOwner, authHeaders("jwt", bobJwt))).status).toBe(200);
     });
 
     it("non-admin cannot PUT design docs", async () => {

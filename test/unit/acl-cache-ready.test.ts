@@ -109,6 +109,44 @@ describe("ChangesFollower onUp / onError", () => {
     follower.stop();
     expect(events).not.toContain("up");
   });
+
+  it("does not advance past a change whose ACL refresh failed", async () => {
+    const enc = new TextEncoder();
+    let calls = 0;
+    const admin = {
+      fetch: vi.fn(async () => {
+        calls += 1;
+        if (calls > 1) return { ok: false, body: null, status: 500 };
+        return {
+          ok: true,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                enc.encode('{"id":"secret","seq":"5-opaque","changes":[{"rev":"2-x"}]}\n'),
+              );
+            },
+          }),
+        };
+      }),
+    };
+    const errors: unknown[] = [];
+    const follower = new ChangesFollower(
+      admin as never,
+      "acldemo",
+      {
+        onChange: async () => {
+          throw new Error("ACL view failed");
+        },
+        onError: (err) => errors.push(err),
+      },
+      "4-previous",
+    );
+
+    follower.start();
+    await vi.waitFor(() => expect(errors).toHaveLength(1), { timeout: 2000 });
+    expect(follower.lastSeq).toBe("4-previous");
+    follower.stop();
+  });
 });
 
 describe("AclCache row refresh failures", () => {
@@ -186,6 +224,27 @@ describe("AclCache row refresh failures", () => {
     expect(state.ready).toBe(false);
     expect(state.followerUp).toBe(false);
     expect(state.error).toMatch(/row unavailable/i);
+  });
+
+  it("fails closed when a row refresh throws before returning an HTTP result", async () => {
+    const cache = cacheWithState({
+      name: "acldemo",
+      acl: new Map(),
+      noacl: false,
+      ready: true,
+      followerUp: true,
+    });
+    cache.adminClient.json = vi.fn(async () => {
+      throw new SyntaxError("invalid view JSON");
+    }) as typeof cache.adminClient.json;
+
+    await expect(cache.refreshDoc("acldemo", "unknown")).rejects.toBeInstanceOf(
+      AclUnavailableError,
+    );
+    expect(cache.get("acldemo")).toMatchObject({
+      ready: false,
+      followerUp: false,
+    });
   });
 
   it("keeps ACL rows on deleted:true so tombstones stay readable", async () => {

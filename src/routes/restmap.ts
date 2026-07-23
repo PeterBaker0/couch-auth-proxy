@@ -16,7 +16,7 @@ export type ActorName =
   | "doc"
   | "docWrite"
   | "docDelete"
-  | "docUpdate" // update handler: authorize with READ
+  | "docUpdate" // update handler: require read/write/delete
   | "rows"
   | "changes"
   | "bulk"

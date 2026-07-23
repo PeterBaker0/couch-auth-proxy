@@ -221,8 +221,13 @@ export const actors: Record<string, Actor> = {
 
     let id = docIdFromParams(c);
     let bufferedBody: string | undefined;
+    let deleting = false;
 
-    if (!id && c.req.method === "POST") {
+    // Direct JSON document writes can carry a tombstone. Attachments are
+    // arbitrary bytes and use the route method for delete authorization.
+    const inspectBody =
+      c.req.method === "POST" || (c.req.method === "PUT" && c.req.param("attachment") == null);
+    if (inspectBody) {
       try {
         bufferedBody = await readTextLimited(c.req.raw, c.get("config").server.maxBodyBytes);
       } catch (err) {
@@ -232,9 +237,15 @@ export const actors: Record<string, Actor> = {
         throw err;
       }
       try {
-        const parsed = JSON.parse(bufferedBody || "null") as { _id?: unknown } | null;
-        if (parsed && typeof parsed._id === "string" && parsed._id) {
-          id = parsed._id;
+        const parsed = JSON.parse(bufferedBody || "null") as {
+          _id?: unknown;
+          _deleted?: unknown;
+        } | null;
+        if (parsed && typeof parsed === "object") {
+          if (!id && typeof parsed._id === "string" && parsed._id) {
+            id = parsed._id;
+          }
+          deleting = parsed._deleted === true;
         }
       } catch {
         // Invalid JSON — let Couch return its native error.
@@ -253,7 +264,9 @@ export const actors: Record<string, Actor> = {
       }
       await ensureDocRow(c.get("aclCache"), state, id);
       const flags = flagsForDoc(state, c.get("principal"), id);
-      if (!flags._w) return couchError("forbidden", "ACL", 403);
+      if (deleting ? !flags._d : !flags._w) {
+        return couchError("forbidden", "ACL", 403);
+      }
     }
 
     if (bufferedBody !== undefined) {
@@ -286,8 +299,8 @@ export const actors: Record<string, Actor> = {
   },
 
   /**
-   * Design `_update` handler: authorize with **read** (not write).
-   * Matches couch-auth-proxy / Couch update-function ACL semantics.
+   * Design `_update` handlers can arbitrarily write or delete their target.
+   * Require both write and delete so a handler cannot elevate a reader/owner.
    */
   async docUpdate(c, next) {
     const state = c.get("dbAclState");
@@ -300,9 +313,11 @@ export const actors: Record<string, Actor> = {
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
-    if (!canRead(state, c.get("principal"), id)) {
+    const flags = flagsForDoc(state, c.get("principal"), id);
+    if (!flags._r) {
       return couchError("not_found", "missing", 404);
     }
+    if (!flags._w || !flags._d) return couchError("forbidden", "ACL", 403);
     await next();
   },
 
@@ -508,6 +523,9 @@ export const actors: Record<string, Actor> = {
       }
       return couchError("bad_request", "Invalid format.", 400);
     }
+    if (!body || typeof body !== "object" || !Array.isArray(body.docs)) {
+      return couchError("bad_request", "Invalid format.", 400);
+    }
 
     const cache = c.get("aclCache");
     await Promise.all(
@@ -653,6 +671,7 @@ export const actors: Record<string, Actor> = {
       if (
         requestBody &&
         Array.isArray(requestBody.fields) &&
+        requestBody.fields.length > 0 &&
         requestBody.fields.every((field) => typeof field === "string") &&
         !requestBody.fields.includes("_id")
       ) {

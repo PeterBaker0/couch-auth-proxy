@@ -22,6 +22,8 @@ export function buildAclDesignDoc(version = "2.1.0") {
     options: {
       local_seq: true,
       include_design: true,
+      // The ACL cache queries one global view, including on partitioned DBs.
+      partitioned: false,
     },
     type: "ddoc",
     version,
