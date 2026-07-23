@@ -304,7 +304,7 @@ export class AclCache {
     const generatedShape = ddoc.type === "ddoc" && Array.isArray(ddoc.acl) && version.length > 0;
     const legacyGeneratedVersion = generatedShape && /^(?:1\.|2\.0\.)/.test(version);
     const needsGlobalViewOption =
-      generatedShape && /^2\.1\./.test(version) && ddoc.options?.partitioned !== false;
+      generatedShape && version.startsWith("2.1.") && ddoc.options?.partitioned !== false;
     const usesLocalSeq = /_local_seq/.test(mapSrc) && !/doc\._rev/.test(mapSrc);
     const hasLegacyDeleteRule = /You can't delete doc\./.test(ddoc.validate_doc_update ?? "");
     const needsLegacyRewrite = legacyGeneratedVersion && (usesLocalSeq || hasLegacyDeleteRule);
