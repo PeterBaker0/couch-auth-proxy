@@ -161,7 +161,9 @@ describe("generated ACL design document", () => {
       acl: [],
       options: { local_seq: true, partitioned: false },
       views: {
-        acl: { map: "function (doc) { emit(doc._id, doc); }" },
+        acl: {
+          map: "function (doc) { var cr = doc.creator, acl = doc.acl, ow = doc.owners; emit(doc._id, {}); }",
+        },
         custom: { map: "function (doc) { emit(doc.kind, 1); }" },
       },
       validate_doc_update:
@@ -184,8 +186,10 @@ describe("generated ACL design document", () => {
       _id: "_design/acl",
       _rev: "3-old",
       version: "2.3.0",
-      views: old.views,
     });
+    const views = written?.views as Record<string, unknown>;
+    expect(views.custom).toEqual(old.views.custom);
+    expect(String((views.acl as { map: string }).map)).toContain("hasCr");
     expect(String(written?.validate_doc_update)).toContain("roleToken");
     expect(String(written?.validate_doc_update)).toContain("Parent can not be changed.");
   });

@@ -104,7 +104,7 @@ export function mergeBulkResults(
 /**
  * CouchDB omits successful rows from `new_edits:false` responses and returns
  * only per-document errors. Rebuild one result per allowed input by matching
- * those errors by id and synthesizing the omitted successes.
+ * errors by id+revision and synthesizing the omitted successes.
  */
 export function normalizeBulkResults(
   allowed: BulkDoc[],
@@ -113,32 +113,70 @@ export function normalizeBulkResults(
 ): Array<Record<string, unknown>> {
   if (!newEditsFalse) return couchResults;
 
-  const byId = new Map<string, Array<Record<string, unknown>>>();
-  const unidentified: Array<Record<string, unknown>> = [];
-  for (const result of couchResults) {
-    if (typeof result.id === "string") {
-      const queued = byId.get(result.id) ?? [];
-      queued.push(result);
-      byId.set(result.id, queued);
-    } else {
-      unidentified.push(result);
+  const idCounts = new Map<string, number>();
+  for (const doc of allowed) {
+    if (typeof doc._id === "string") {
+      idCounts.set(doc._id, (idCounts.get(doc._id) ?? 0) + 1);
     }
   }
+  const used = new Set<number>();
 
   return allowed.map((doc) => {
-    if (typeof doc._id === "string") {
-      const queued = byId.get(doc._id);
-      const matched = queued?.shift();
-      if (matched) return matched;
+    const id = typeof doc._id === "string" ? doc._id : undefined;
+    const rev = bulkDocRevision(doc);
+    let match = -1;
+    if (id && rev) {
+      match = couchResults.findIndex(
+        (result, index) => !used.has(index) && result.id === id && result.rev === rev,
+      );
     }
-    const fallback = unidentified.shift();
-    if (fallback) return fallback;
+    if (match < 0 && id && idCounts.get(id) === 1) {
+      match = couchResults.findIndex((result, index) => !used.has(index) && result.id === id);
+    }
+    if (match < 0 && allowed.length === 1) {
+      match = couchResults.findIndex((_result, index) => !used.has(index));
+    }
+    if (match >= 0) {
+      used.add(match);
+      return couchResults[match]!;
+    }
+
+    const ambiguous =
+      id != null &&
+      (idCounts.get(id) ?? 0) > 1 &&
+      couchResults.some((result, index) => !used.has(index) && result.id === id);
+    if (ambiguous) {
+      return {
+        id,
+        rev,
+        error: "unknown_error",
+        reason: "Ambiguous CouchDB replication result.",
+      };
+    }
     return {
       ok: true,
-      id: doc._id,
-      rev: typeof doc._rev === "string" ? doc._rev : undefined,
+      id,
+      rev,
     };
   });
+}
+
+/** Revision identity accepted by Couch replication bodies. */
+function bulkDocRevision(doc: BulkDoc): string | undefined {
+  if (typeof doc._rev === "string") return doc._rev;
+  const revisions = doc._revisions;
+  if (!revisions || typeof revisions !== "object" || Array.isArray(revisions)) return undefined;
+  const start = (revisions as { start?: unknown }).start;
+  const ids = (revisions as { ids?: unknown }).ids;
+  if (
+    typeof start === "number" &&
+    Number.isInteger(start) &&
+    Array.isArray(ids) &&
+    typeof ids[0] === "string"
+  ) {
+    return `${start}-${ids[0]}`;
+  }
+  return undefined;
 }
 
 /**

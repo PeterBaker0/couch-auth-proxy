@@ -78,7 +78,6 @@ export async function forwardToCouch(
       stripHeaders: options?.stripResponseHeaders,
       rewriteLocation: {
         fromOrigin: new URL(config.couch.url).origin,
-        toOrigin: new URL(c.req.url).origin,
       },
     });
   } catch (err) {
@@ -168,7 +167,7 @@ export function toClientResponse(
     keepEncoding?: boolean;
     body?: ReadableStream<Uint8Array> | string | null;
     stripHeaders?: string[];
-    rewriteLocation?: { fromOrigin: string; toOrigin: string };
+    rewriteLocation?: { fromOrigin: string };
   },
 ): Response {
   const responseHeaders = new Headers();
@@ -188,13 +187,9 @@ export function toClientResponse(
     try {
       const parsed = new URL(location);
       if (parsed.origin === options.rewriteLocation.fromOrigin) {
-        responseHeaders.set(
-          "location",
-          new URL(
-            `${parsed.pathname}${parsed.search}${parsed.hash}`,
-            options.rewriteLocation.toOrigin,
-          ).href,
-        );
+        // Resolve against the caller's public origin (including TLS
+        // termination) without trusting forwarded host/proto headers.
+        responseHeaders.set("location", `${parsed.pathname}${parsed.search}${parsed.hash}`);
       }
     } catch {
       // Preserve malformed upstream values; clients can handle them as Couch sent them.

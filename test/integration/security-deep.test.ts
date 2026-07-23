@@ -653,6 +653,41 @@ describe("security deep edges", () => {
       expect(body.some((r) => r.id === ids.alicePrivate && r.error === "forbidden")).toBe(true);
       expect(body.some((r) => r.ok === true || (r.id && !r.error))).toBe(true);
     });
+
+    it("new_edits:false replays cannot poison the authoritative ACL cache", async () => {
+      const id = `replay-cache-${suiteId}`;
+      const created = await putDoc(
+        DB,
+        id,
+        {
+          creator: "alice",
+          owners: ["u-bob"],
+          acl: ["u-bob"],
+          kind: "replay-cache",
+        },
+        authHeaders("jwt", aliceJwt),
+      );
+      expect(created.ok).toBe(true);
+      await waitForReadable(DB, id, authHeaders("jwt", bobJwt));
+      const current = await getDoc(DB, id, authHeaders("jwt", bobJwt));
+      const doc = (await current.json()) as Record<string, unknown> & { _rev: string };
+
+      const replay = await fetch(`${PROXY}/${DB}/_bulk_docs`, {
+        method: "POST",
+        headers: {
+          ...authHeaders("jwt", bobJwt),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          new_edits: false,
+          docs: [{ ...doc, acl: ["u-carol"], body: "not-authoritative" }],
+        }),
+      });
+      expect(replay.ok).toBe(true);
+
+      expect((await getDoc(DB, id, authHeaders("jwt", bobJwt))).status).toBe(200);
+      expect((await getDoc(DB, id, authHeaders("jwt", carolJwt))).status).toBe(404);
+    });
   });
 
   // ── Default-deny leftovers / path abuse ────────────────────────────────

@@ -11,11 +11,10 @@
  */
 import type { Context, Next } from "hono";
 import type { AppEnv } from "../middleware/context.js";
-import { AclUnavailableError, DbMissingError } from "../acl/cache.js";
+import { AclUnavailableError, DbMissingError, type DbAclState } from "../acl/cache.js";
 import { isDatabaseName, isDocumentId } from "../acl/names.js";
 import { dbAccessLevel, methodAllowed } from "../acl/restrict.js";
 import { canDelete, canRead, ensureDocRow, flagsForDoc } from "../acl/lookup.js";
-import { aclRowFromDoc } from "../acl/resolve.js";
 import {
   couchError,
   fetchFromCouch,
@@ -63,6 +62,30 @@ function docIdFromParams(c: AppContext): string {
 /** Apply Couch endpoint classification plus the configured document-id ceiling. */
 function validDocumentId(c: AppContext, id: string): boolean {
   return isDocumentId(id, c.get("config").couch.maxIdLength);
+}
+
+/**
+ * Refresh an accepted write from Couch's authoritative ACL view. Submitted
+ * bodies are not authoritative for `new_edits:false`, conflicts, or custom
+ * ACL maps. Preserve the prior row only when a winning delete removes it.
+ */
+async function refreshWrittenDoc(
+  c: AppContext,
+  state: DbAclState,
+  id: string,
+  deleting: boolean,
+): Promise<void> {
+  const retained = state.acl.get(id);
+  try {
+    await c.get("aclCache").refreshDoc(state.name, id);
+  } catch {
+    // The cache marks itself unavailable; the committed Couch response remains
+    // accurate, and subsequent ACL requests fail closed until reload.
+    return;
+  }
+  if (deleting && !state.acl.has(id) && retained) {
+    state.acl.set(id, { ...retained, deleted: true });
+  }
 }
 
 /**
@@ -238,7 +261,6 @@ export const actors: Record<string, Actor> = {
     let bufferedBody: string | undefined;
     let deleting = false;
     let bodyParseFailed = false;
-    let parsedDocument: Record<string, unknown> | undefined;
     const principal = c.get("principal");
 
     // Direct JSON document writes can carry a tombstone. Attachments are
@@ -261,7 +283,6 @@ export const actors: Record<string, Actor> = {
           _deleted?: unknown;
         } | null;
         if (parsed && typeof parsed === "object") {
-          parsedDocument = parsed as Record<string, unknown>;
           if (!id && typeof parsed._id === "string" && parsed._id) {
             id = parsed._id;
           }
@@ -304,23 +325,12 @@ export const actors: Record<string, Actor> = {
           "Content-Type": c.req.header("content-type") || "application/json",
         },
       });
-      if (upstream.ok && id && parsedDocument) {
-        if (deleting) {
-          const retained = state.acl.get(id);
-          if (retained) state.acl.set(id, { ...retained, deleted: true });
-        } else {
-          const aclDoc: Parameters<typeof aclRowFromDoc>[0] = { _id: id };
-          if (typeof parsedDocument._rev === "string") aclDoc._rev = parsedDocument._rev;
-          for (const field of ["creator", "owners", "acl", "parent"] as const) {
-            if (Object.hasOwn(parsedDocument, field)) aclDoc[field] = parsedDocument[field];
-          }
-          state.acl.set(id, aclRowFromDoc(aclDoc));
-        }
+      if (upstream.ok && id) {
+        await refreshWrittenDoc(c, state, id, deleting);
       }
       return toClientResponse(upstream, {
         rewriteLocation: {
           fromOrigin: new URL(config.couch.url).origin,
-          toOrigin: new URL(c.req.url).origin,
         },
       });
     }
@@ -343,7 +353,9 @@ export const actors: Record<string, Actor> = {
     if (!canDelete(state, c.get("principal"), id)) {
       return couchError("forbidden", "ACL", 403);
     }
-    await next();
+    const upstream = await fetchFromCouch(c, c.get("config"));
+    if (upstream.ok) await refreshWrittenDoc(c, state, id, true);
+    return toClientResponse(upstream);
   },
 
   /**
@@ -376,7 +388,8 @@ export const actors: Record<string, Actor> = {
   async copy(c) {
     const state = c.get("dbAclState");
     const id = docIdFromParams(c);
-    if (!state || !id) return couchError("bad_request", "missing id", 400);
+    if (!state) return forwardToCouch(c, c.get("config"));
+    if (!id) return couchError("bad_request", "missing id", 400);
     if (!validDocumentId(c, id)) {
       if (c.get("principal").admin) return forwardToCouch(c, c.get("config"));
       return couchError("not_found", "Unsupported endpoint.", 404);
@@ -616,17 +629,14 @@ export const actors: Record<string, Actor> = {
     let results = (await upstream.json()) as Array<Record<string, unknown>>;
     if (!Array.isArray(results)) results = [];
     results = normalizeBulkResults(filtered.allowed, results, String(body.new_edits) === "false");
-    for (let i = 0; i < filtered.allowed.length; i++) {
-      const doc = filtered.allowed[i];
-      const result = results[i];
-      if (!doc || typeof doc._id !== "string" || result?.error) continue;
-      if (doc._deleted) {
-        const retained = state.acl.get(doc._id);
-        if (retained) state.acl.set(doc._id, { ...retained, deleted: true });
-      } else {
-        state.acl.set(doc._id, aclRowFromDoc(doc as Parameters<typeof aclRowFromDoc>[0]));
-      }
+    const writtenIds = new Set<string>();
+    const refreshes: Array<Promise<void>> = [];
+    for (const doc of filtered.allowed) {
+      if (typeof doc._id !== "string" || writtenIds.has(doc._id)) continue;
+      writtenIds.add(doc._id);
+      refreshes.push(refreshWrittenDoc(c, state, doc._id, doc._deleted === true));
     }
+    await Promise.all(refreshes);
     return toClientResponse(upstream, {
       body: JSON.stringify(mergeBulkResults(filtered.slots, results)),
     });

@@ -351,10 +351,14 @@ export class AclCache {
       version.startsWith("2.1.") &&
       /Readers list can not be changed\./.test(validateSrc) &&
       (!/Parent can not be changed\./.test(validateSrc) || !/roleToken/.test(validateSrc));
+    const looksLikeGeneratedAclMap = /var cr = doc\.creator, acl = doc\.acl, ow = doc\.owners/.test(
+      mapSrc,
+    );
+    const needsV21FullPolicyRewrite = needsOwnerPolicyRewrite && looksLikeGeneratedAclMap;
     const needsV22PolicyRewrite =
       generatedShape &&
       version.startsWith("2.2.") &&
-      /var cr = doc\.creator, acl = doc\.acl, ow = doc\.owners/.test(mapSrc) &&
+      looksLikeGeneratedAclMap &&
       /if \(odc && odc != ndc\)/.test(validateSrc);
     if (
       !needsLegacyRewrite &&
@@ -367,7 +371,7 @@ export class AclCache {
 
     const generated = buildAclDesignDoc();
     const next =
-      needsLegacyRewrite || needsV22PolicyRewrite
+      needsLegacyRewrite || needsV21FullPolicyRewrite || needsV22PolicyRewrite
         ? {
             ...ddoc,
             _id: ddoc._id ?? generated._id,

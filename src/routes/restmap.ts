@@ -228,7 +228,6 @@ export const ROUTES: RouteDef[] = [
   { method: "get", path: "/:db/_local/:docId", actors: ["db", "pipe"] },
   { method: "put", path: "/:db/_local/:docId", actors: ["db", "pipe"] },
   { method: "delete", path: "/:db/_local/:docId", actors: ["db", "pipe"] },
-  { method: "copy", path: "/:db/_local/:docId", actors: ["db", "pipe"] },
 
   // —— Regular docs + attachments + COPY ——
   { method: "get", path: "/:db/:docId", actors: ["db", "doc", "pipe"] },

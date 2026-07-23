@@ -92,7 +92,7 @@ Bucket rules live on `_design/acl`:
 
 ## API coverage
 
-ACL-filtered: single docs + attachments, same-database `COPY`, local-document `COPY`, `_all_docs`, `_design_docs`, `_local_docs`, `_bulk_get`, views, `_changes` (incl. `continuous` / `live`), `_bulk_docs`, `_revs_diff` / `_missing_revs`, `_find`, partition `_all_docs`/`_find`/views, `_all_dbs`.
+ACL-filtered: single docs + attachments, same-database `COPY`, `_all_docs`, `_design_docs`, `_local_docs`, `_bulk_get`, views, `_changes` (incl. `continuous` / `live`), `_bulk_docs`, `_revs_diff` / `_missing_revs`, `_find`, partition `_all_docs`/`_find`/views, `_all_dbs`.
 
 Admin-only: Fauxton `/_utils`, `/_node/*`, `/_scheduler/*`, `/_replicate`, `/_db_updates`, DB create/delete, `_security`, `_revs_limit`, compaction, Mango `_index` management, search/nouveau, other partition paths.
 

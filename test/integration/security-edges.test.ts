@@ -528,6 +528,7 @@ describe("security edge cases", () => {
         30,
       );
       const idsSeen = lines.map((line) => line.id).filter(Boolean);
+      expect(idsSeen).toContain(ids.open);
       expect(idsSeen).not.toContain(ids.alicePrivate);
       expect(idsSeen).not.toContain(ids.withAtt);
     });
@@ -961,9 +962,7 @@ describe("security edge cases", () => {
       const parent = await getDoc(DB, parentId, authHeaders("jwt", bobJwt));
       const parentRev = ((await parent.json()) as { _rev: string })._rev;
       expect((await deleteDoc(DB, parentId, parentRev, authHeaders("jwt", bobJwt))).ok).toBe(true);
-      await waitUntil("deleted parent stops granting child access", async () => {
-        return (await getDoc(DB, childId, authHeaders("jwt", bobJwt))).status === 404;
-      });
+      expect((await getDoc(DB, childId, authHeaders("jwt", bobJwt))).status).toBe(404);
     });
 
     it("restrict.* hides DB from _all_dbs and returns 404 on access", async () => {

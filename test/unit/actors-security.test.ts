@@ -360,7 +360,7 @@ describe("admin forwarding", () => {
       body: JSON.stringify({ creator: "bob" }),
     });
     expect(res.status).toBe(201);
-    expect(res.headers.get("location")).toBe("http://localhost/docs/new");
+    expect(res.headers.get("location")).toBe("/docs/new");
   });
 });
 
@@ -379,6 +379,85 @@ describe("no-ACL database route policy", () => {
     });
     expect(res.status).toBe(403);
     expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("continues to pass through ordinary COPY requests", async () => {
+    const state = stateWith([]);
+    state.noacl = true;
+    const { app } = appWithState(state);
+    const upstream = vi.fn(async () => new Response("{}", { status: 201 }));
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/source", {
+      method: "COPY",
+      headers: { Destination: "destination" },
+    });
+    expect(res.status).toBe(201);
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+});
+
+describe("authoritative write refresh", () => {
+  it("does not trust submitted ACL fields after new_edits:false writes", async () => {
+    const state = stateWith([
+      { _id: "shared", creator: "alice", owners: ["u-bob"], acl: ["u-bob"] },
+    ]);
+    const { app, services } = appWithState(state);
+    services.aclCache.refreshDoc = vi.fn(async () => {
+      state.acl.set(
+        "shared",
+        aclRowFromDoc({
+          _id: "shared",
+          _rev: "2-winning",
+          creator: "alice",
+          owners: ["u-bob"],
+          acl: ["u-bob"],
+        }),
+      );
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("{}", { status: 201 })),
+    );
+
+    const res = await app.request("http://localhost/docs/shared?new_edits=false", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        _id: "shared",
+        _rev: "1-replayed",
+        creator: "alice",
+        owners: ["u-bob"],
+        acl: ["u-carol"],
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    expect(services.aclCache.refreshDoc).toHaveBeenCalledWith("docs", "shared");
+    expect(state.acl.get("shared")?._r["u-carol"]).toBeUndefined();
+  });
+
+  it("marks a successfully deleted parent before authorizing children", async () => {
+    const state = stateWith([
+      { _id: "parent", creator: "bob" },
+      { _id: "child", creator: "alice", parent: "parent" },
+    ]);
+    const { app, services } = appWithState(state);
+    services.aclCache.refreshDoc = vi.fn(async () => {
+      state.acl.delete("parent");
+    });
+    const upstream = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", upstream);
+
+    const deleted = await app.request("http://localhost/docs/parent", {
+      method: "DELETE",
+    });
+    expect(deleted.status).toBe(200);
+    expect(state.acl.get("parent")?.deleted).toBe(true);
+
+    const child = await app.request("http://localhost/docs/child");
+    expect(child.status).toBe(404);
+    expect(upstream).toHaveBeenCalledOnce();
   });
 });
 

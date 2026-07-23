@@ -164,7 +164,7 @@ Unsupported / unsafe for non-admins: `_list`, `_show` / `_update` without a doc 
 
 ### Local docs (`_local/…`)
 
-Used for PouchDB sync checkpoints. After the DB gate, members can read/write/copy `_local` docs (Couch checkpoint semantics). Do not put secrets you would not share among DB members there.
+Used for PouchDB sync checkpoints. After the DB gate, members can read/write `_local` docs (Couch checkpoint semantics). Do not put secrets you would not share among DB members there.
 
 ### System databases
 

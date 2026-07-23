@@ -149,6 +149,36 @@ describe("filterBulkDocs", () => {
     expect(merged[2]).toMatchObject({ id: "bad-second", error: "forbidden" });
   });
 
+  it("aligns duplicate new_edits:false ids by revision identity", () => {
+    const normalized = normalizeBulkResults(
+      [
+        { _id: "conflicted", _rev: "2-allowed" },
+        {
+          _id: "conflicted",
+          _revisions: { start: 3, ids: ["rejected", "parent", "root"] },
+        },
+      ],
+      [
+        {
+          id: "conflicted",
+          rev: "3-rejected",
+          error: "forbidden",
+          reason: "validation",
+        },
+      ],
+      true,
+    );
+    expect(normalized).toEqual([
+      { ok: true, id: "conflicted", rev: "2-allowed" },
+      {
+        id: "conflicted",
+        rev: "3-rejected",
+        error: "forbidden",
+        reason: "validation",
+      },
+    ]);
+  });
+
   it("rejects reserved or oversized ids before they reach Couch", () => {
     const filtered = filterBulkDocs(
       state,
