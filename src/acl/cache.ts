@@ -696,8 +696,23 @@ export class AclCache {
       return;
     }
 
-    // The generated ACL view emits every live document. A live document with
-    // no row means the policy cannot be evaluated safely.
+    if (state.generatedAclMap) {
+      try {
+        const live = await this.aclRowFromLiveDoc(db, id, row.value?.rev);
+        if (live) {
+          state.acl.set(id, live);
+          state.tombstones?.delete(id);
+          return;
+        }
+      } catch (err) {
+        const message = `Live document ACL unavailable in ${db}: ${String(err)}`;
+        this.markUnavailable(state, message);
+        throw new AclUnavailableError(message);
+      }
+    }
+
+    // Custom maps cannot be reproduced safely from document ACL fields. A
+    // live document omitted by one of those maps makes policy indeterminate.
     const message = `ACL view omitted live document ${id} in ${db}`;
     this.markUnavailable(state, message);
     throw new AclUnavailableError(message);
@@ -784,6 +799,38 @@ export class AclCache {
       _w: {},
       _d: {},
     };
+  }
+
+  /** Reproduce the shipped map for a live revision during a view-index race. */
+  private async aclRowFromLiveDoc(
+    db: string,
+    id: string,
+    rev?: string,
+  ): Promise<AclRow | undefined> {
+    const res = await this.admin.json<{
+      _id?: string;
+      _rev?: string;
+      _deleted?: boolean;
+      creator?: string;
+      owners?: string[];
+      acl?: string[];
+      parent?: string;
+    }>(`/${encodeURIComponent(db)}/${encodeURIComponent(id)}`, {
+      ...(rev ? { query: { rev } } : {}),
+    });
+    if (!res.ok) {
+      if (res.status === 404) return undefined;
+      throw new Error(`Live revision unavailable: ${res.status}`);
+    }
+    if (!res.body._id || res.body._deleted) return undefined;
+    return aclRowFromDoc({
+      _id: res.body._id,
+      _rev: res.body._rev ?? rev,
+      creator: res.body.creator,
+      owners: res.body.owners,
+      acl: res.body.acl,
+      parent: res.body.parent,
+    });
   }
 
   /** Mark a DB unusable until `ensureDb` completes a fresh full reload. */

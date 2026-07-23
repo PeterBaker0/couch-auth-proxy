@@ -337,6 +337,50 @@ describe("AclCache row refresh failures", () => {
     expect(state.acl.has("gone")).toBe(false);
   });
 
+  it("derives a shipped-map ACL row when the live view index briefly lags", async () => {
+    const cache = cacheWithState({
+      name: "acldemo",
+      acl: new Map(),
+      generatedAclMap: true,
+      noacl: false,
+      ready: true,
+      followerUp: true,
+    });
+    cache.adminClient.json = vi.fn(async (path: string) => {
+      if (path.endsWith("/_view/acl")) {
+        return {
+          ok: true as const,
+          status: 200,
+          body: { rows: [{ key: "fresh", error: "not_found" }] },
+        };
+      }
+      if (path.endsWith("/_all_docs")) {
+        return {
+          ok: true as const,
+          status: 200,
+          body: { rows: [{ id: "fresh", value: { rev: "1-fresh" } }] },
+        };
+      }
+      return {
+        ok: true as const,
+        status: 200,
+        body: {
+          _id: "fresh",
+          _rev: "1-fresh",
+          creator: "alice",
+          acl: ["u-bob"],
+        },
+      };
+    }) as typeof cache.adminClient.json;
+
+    await cache.refreshDoc("acldemo", "fresh");
+
+    expect(cache.get("acldemo")?.acl.get("fresh")?._r).toMatchObject({
+      "u-alice": 1,
+      "u-bob": 1,
+    });
+  });
+
   it("recovers ACL from pre-delete revision when cache was cold", async () => {
     const config = loadConfig({
       COUCH_URL: "http://127.0.0.1:5984",
