@@ -44,6 +44,14 @@ export type ForwardOptions = {
   keepEncoding?: boolean;
 };
 
+/** An untrusted request path attempted to resolve outside the Couch origin. */
+export class UnsafeUpstreamUrlError extends Error {
+  constructor() {
+    super("Upstream URL must stay on the configured CouchDB origin");
+    this.name = "UnsafeUpstreamUrlError";
+  }
+}
+
 /**
  * Proxy the request to Couch and return a client-facing Response.
  * Maps `BodyTooLargeError` to Couch-shaped 413.
@@ -59,6 +67,9 @@ export async function forwardToCouch(
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
       return couchError("bad_request", "Request body too large", 413);
+    }
+    if (err instanceof UnsafeUpstreamUrlError) {
+      return couchError("bad_request", "Invalid request path", 400);
     }
     throw err;
   }
@@ -76,7 +87,13 @@ export async function fetchFromCouch(
   const incoming = c.req.raw;
   const path = options?.path ?? c.req.path;
   const query = options?.query ?? (c.req.url.includes("?") ? `?${c.req.url.split("?")[1]}` : "");
-  const url = new URL(path + query, config.couch.url);
+  const couchBase = new URL(config.couch.url);
+  const url = new URL(path + query, couchBase);
+  // WHATWG URL resolution treats `//host/path` as protocol-relative. Never let
+  // an admin catch-all request forward credentials to a caller-selected host.
+  if (url.origin !== couchBase.origin) {
+    throw new UnsafeUpstreamUrlError();
+  }
 
   const headers = new Headers();
   incoming.headers.forEach((value, key) => {

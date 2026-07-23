@@ -147,9 +147,11 @@ function filterLineFeed(
         // continuous NDJSON
         try {
           const obj = JSON.parse(line) as ChangeLine;
-          if (obj.last_seq != null) return line;
-          // Fail closed: id-less lines (other than last_seq) are not forwarded.
-          if (obj.id == null || typeof obj.id !== "string") return null;
+          // A pure last_seq row is control metadata. If Couch (or a compatible
+          // upstream) includes an id too, it is still a document change and
+          // must pass the ACL check.
+          if (obj.id == null) return obj.last_seq != null ? line : null;
+          if (typeof obj.id !== "string") return null;
           if (!canRead(state, principal, obj.id)) return null;
           return line;
         } catch {
@@ -207,8 +209,8 @@ function filterJsonChanges(
 function allowChangeJson(payload: string, state: DbAclState, principal: Principal): boolean {
   try {
     const obj = JSON.parse(payload) as ChangeLine;
-    if (obj.last_seq != null) return true;
-    if (!obj.id || typeof obj.id !== "string") return false;
+    if (obj.id == null) return obj.last_seq != null;
+    if (typeof obj.id !== "string" || !obj.id) return false;
     return canRead(state, principal, obj.id);
   } catch {
     return false;
