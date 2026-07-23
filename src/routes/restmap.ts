@@ -12,7 +12,6 @@ export type ActorName =
   | "pipe"
   | "admin"
   | "session"
-  | "auth"
   | "db"
   | "doc"
   | "docWrite"
@@ -28,8 +27,7 @@ export type ActorName =
   | "unsupported"
   | "find"
   | "indexAdmin"
-  | "copy"
-  | "notFound";
+  | "copy";
 
 export type HttpMethod = "get" | "post" | "put" | "delete" | "head" | "copy";
 

@@ -43,6 +43,7 @@ export function filterBulkDocs(
   state: DbAclState,
   principal: Principal,
   body: BulkDocsBody,
+  isValidId: (id: string) => boolean = () => true,
 ): BulkFilterResult {
   const docs = Array.isArray(body.docs) ? body.docs : [];
   const { docs: _docs, ...rest } = body;
@@ -61,9 +62,9 @@ export function filterBulkDocs(
       slots.push(null);
       continue;
     }
-    const permitted = doc._deleted
-      ? canDelete(state, principal, doc._id)
-      : canWrite(state, principal, doc._id);
+    const permitted =
+      isValidId(doc._id) &&
+      (doc._deleted ? canDelete(state, principal, doc._id) : canWrite(state, principal, doc._id));
     if (permitted) {
       allowed.push(doc);
       slots.push(null);
@@ -106,13 +107,15 @@ export function filterRevsObject(
   state: DbAclState,
   principal: Principal,
   body: Record<string, unknown>,
+  isValidId: (id: string) => boolean = () => true,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [id, val] of Object.entries(body)) {
     if (
-      canRead(state, principal, id) ||
-      canWrite(state, principal, id) ||
-      canDelete(state, principal, id)
+      isValidId(id) &&
+      (canRead(state, principal, id) ||
+        canWrite(state, principal, id) ||
+        canDelete(state, principal, id))
     ) {
       out[id] = val;
     }

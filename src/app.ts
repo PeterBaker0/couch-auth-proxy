@@ -9,7 +9,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { AppConfig } from "./config.js";
-import { AclCache } from "./acl/cache.js";
+import { AclCache, AclUnavailableError } from "./acl/cache.js";
 import { SessionResolver } from "./auth/session.js";
 import { withPrincipal, withServices, type AppEnv } from "./middleware/context.js";
 import { rateLimit } from "./middleware/rateLimit.js";
@@ -62,8 +62,28 @@ export function createApp(services: AppServices): Hono<AppEnv> {
       },
       credentials: services.config.cors.allowCredentials,
       allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "COPY"],
-      allowHeaders: ["Content-Type", "Authorization", "Accept", "Destination"],
-      exposeHeaders: ["Content-Type", "Server", "ETag", "Location", "X-Request-Id"],
+      allowHeaders: [
+        "Content-Type",
+        "Authorization",
+        "Accept",
+        "Destination",
+        "If-Match",
+        "If-None-Match",
+        "Range",
+        "Content-Range",
+        "X-Couch-Full-Commit",
+      ],
+      exposeHeaders: [
+        "Content-Type",
+        "Content-Range",
+        "Accept-Ranges",
+        "Server",
+        "ETag",
+        "Location",
+        "X-Couch-Id",
+        "X-Couch-Request-ID",
+        "X-Request-Id",
+      ],
       maxAge: 86400,
     }),
   );
@@ -96,6 +116,15 @@ export function createApp(services: AppServices): Hono<AppEnv> {
   });
 
   registerRoutes(app);
+
+  // Keyed ACL view failures may happen after the DB gate. Keep their response
+  // fail-closed and Couch-shaped instead of exposing a generic Hono 500.
+  app.onError((err) => {
+    if (err instanceof AclUnavailableError) {
+      return jsonResponse({ error: "service_unavailable", reason: "ACL cache unavailable" }, 503);
+    }
+    throw err;
+  });
 
   return app;
 }

@@ -31,8 +31,8 @@ export function isDatabaseName(name: string): boolean {
  * True when `id` is a normal doc id or a known special prefix (`_design/`, `_local/`).
  * Other underscore ids are reserved Couch endpoints (e.g. `_purged_infos_limit`).
  */
-export function isDocumentId(id: string): boolean {
-  if (!id) return false;
+export function isDocumentId(id: string, maxLength = Number.POSITIVE_INFINITY): boolean {
+  if (!id || id.length > maxLength) return false;
   if (!id.startsWith("_")) return true;
   return id.startsWith("_design/") || id.startsWith("_local/");
 }

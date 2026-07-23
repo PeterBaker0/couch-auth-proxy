@@ -14,6 +14,7 @@ import {
   authHeaders,
   collectChangesFeed,
   createUserIfMissing,
+  deleteDoc,
   ensureDaveMembership,
   ensureDbOpenForDemoUsers,
   getAttachment,
@@ -764,6 +765,61 @@ describe("security edge cases", () => {
         },
       });
       expect(res.status).toBe(403);
+    });
+
+    it("COPY authorizes the destination id before its rev query", async () => {
+      const existing = await getDoc(DB, ids.alicePrivate, authHeaders("jwt", aliceJwt));
+      const rev = ((await existing.json()) as { _rev: string })._rev;
+      const res = await fetch(`${PROXY}/${DB}/${encodeURIComponent(ids.bobReader)}`, {
+        method: "COPY",
+        headers: {
+          ...authHeaders("jwt", bobJwt),
+          Destination: `${encodeURIComponent(ids.alicePrivate)}?rev=${encodeURIComponent(rev)}`,
+        },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("COPY rejects absolute and cross-database destinations", async () => {
+      for (const destination of [
+        `${DB}-other/copied`,
+        `/${DB}/copied`,
+        `https://example.test/${DB}/copied`,
+      ]) {
+        const res = await fetch(`${PROXY}/${DB}/${encodeURIComponent(ids.bobReader)}`, {
+          method: "COPY",
+          headers: {
+            ...authHeaders("jwt", bobJwt),
+            Destination: destination,
+          },
+        });
+        expect(res.status, destination).toBe(400);
+      }
+    });
+
+    it("parent-inherited delete is enforced by the proxy and accepted by Couch", async () => {
+      const parentId = `delete-parent-${suiteId}`;
+      const childId = `delete-child-${suiteId}`;
+      const parent = await putDoc(
+        DB,
+        parentId,
+        { creator: "bob", kind: "delete-parent" },
+        authHeaders("jwt", bobJwt),
+      );
+      expect(parent.ok).toBe(true);
+      const child = await putDoc(
+        DB,
+        childId,
+        { creator: "alice", parent: parentId, kind: "delete-child" },
+        authHeaders("jwt", aliceJwt),
+      );
+      expect(child.ok).toBe(true);
+      await waitForReadable(DB, childId, authHeaders("jwt", bobJwt));
+
+      const current = await getDoc(DB, childId, authHeaders("jwt", aliceJwt));
+      const rev = ((await current.json()) as { _rev: string })._rev;
+      const deleted = await deleteDoc(DB, childId, rev, authHeaders("jwt", bobJwt));
+      expect(deleted.ok, `inherited delete: ${deleted.status} ${await deleted.text()}`).toBe(true);
     });
 
     it("restrict.* hides DB from _all_dbs and returns 404 on access", async () => {
