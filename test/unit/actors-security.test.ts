@@ -366,17 +366,21 @@ describe("reserved design endpoints", () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 
-  it("rejects encoded design prefixes before generic attachment routing", async () => {
+  it("rejects encoded design separators before generic attachment routing", async () => {
     const state = stateWith([{ _id: "_design/app" }, { _id: "private", creator: "alice" }]);
     const { app } = appWithState(state);
     const upstream = vi.fn();
     vi.stubGlobal("fetch", upstream);
 
-    const res = await app.request(
-      "http://localhost/docs/_design%2Fapp/_view/by_kind?include_docs=true",
-    );
-
-    expect(res.status).toBe(404);
+    for (const path of [
+      "/docs/_design%2Fapp/_view/by_kind?include_docs=true",
+      "/docs/_design/app/_view%2Fby_kind?include_docs=true",
+      "/docs/_design/app/_search%2Fby_name",
+      "/docs/_design/app/_rewrite%2Ftarget",
+    ]) {
+      const res = await app.request(`http://localhost${path}`);
+      expect(res.status, path).toBe(404);
+    }
     expect(upstream).not.toHaveBeenCalled();
   });
 });
@@ -389,7 +393,9 @@ describe("_bulk_get cache synchronization", () => {
       state.acl.set(id, aclRowFromDoc({ _id: id, creator: "bob" }));
     });
     const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect(JSON.parse(String(init?.body))).toEqual({ docs: [{ id: "just-created" }] });
+      expect(JSON.parse(String(init?.body))).toEqual({
+        docs: [{ id: "just-created" }, { id: "just-created" }],
+      });
       return new Response(
         JSON.stringify({
           results: [{ id: "just-created", docs: [{ ok: { _id: "just-created" } }] }],
@@ -402,7 +408,7 @@ describe("_bulk_get cache synchronization", () => {
     const res = await app.request("http://localhost/docs/_bulk_get", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ docs: [{ id: "just-created" }] }),
+      body: JSON.stringify({ docs: [{ id: "just-created" }, { id: "just-created" }] }),
     });
 
     expect(res.status).toBe(200);
@@ -410,6 +416,7 @@ describe("_bulk_get cache synchronization", () => {
       results: [{ id: "just-created", docs: [{ ok: { _id: "just-created" } }] }],
     });
     expect(services.aclCache.refreshDoc).toHaveBeenCalledWith("docs", "just-created");
+    expect(services.aclCache.refreshDoc).toHaveBeenCalledTimes(1);
   });
 });
 

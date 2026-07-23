@@ -15,7 +15,7 @@
  */
 import type { AppConfig } from "../config.js";
 import type { AclRow, DbAclOverlay, RestrictMap } from "./types.js";
-import { buildAclDesignDoc } from "./ddoc.js";
+import { ACL_MAP_SOURCE, buildAclDesignDoc } from "./ddoc.js";
 import { aclRowFromDoc } from "./resolve.js";
 import { AdminClient } from "../couch/adminClient.js";
 import { ChangesFollower, fetchAclRow, fetchUpdateSeq } from "./changesFollower.js";
@@ -33,6 +33,7 @@ type EnsureDdocResult =
 
 const log = createLogger("acl-cache");
 const ACL_VIEW_PAGE_SIZE = 2_000;
+const ACL_RECOVERY_CONCURRENCY = 16;
 
 /** Mutable per-DB ACL state held in the process. */
 export type DbAclState = {
@@ -43,12 +44,18 @@ export type DbAclState = {
   tombstones?: Set<string>;
   /** Whether current deleted winners were reconstructed after process start. */
   tombstonesLoaded?: boolean;
+  /** Exact map source used to build `acl`; detects policy-map changes. */
+  aclMapSource?: string;
+  /** Whether historical rows can be reconstructed with `aclRowFromDoc`. */
+  generatedAclMap?: boolean;
   dbacl?: DbAclOverlay;
   restrict?: RestrictMap;
   compiledRestrict?: CompiledRestrict;
   /** true when bucket has no usable ACL ddoc — pass-through Couch behavior */
   noacl: boolean;
   ready: boolean;
+  /** True while a design-document policy snapshot is rebuilding. */
+  reloading?: boolean;
   /** Last ensure/load failure message — callers must fail closed */
   error?: string;
   /** DB does not exist upstream */
@@ -216,6 +223,10 @@ export class AclCache {
    * Throws `DbMissingError` / `AclUnavailableError` — actors map these to HTTP.
    */
   async requireReady(db: string): Promise<DbAclState> {
+    const existing = this.dbs.get(db);
+    if (existing?.reloading) {
+      throw new AclUnavailableError("ACL policy reload in progress");
+    }
     const state = await this.ensureDb(db);
     if (state.missing) {
       throw new DbMissingError(db);
@@ -259,6 +270,8 @@ export class AclCache {
         state.acl.clear();
         state.tombstones?.clear();
         state.tombstonesLoaded = false;
+        state.aclMapSource = undefined;
+        state.generatedAclMap = false;
         state.dbacl = undefined;
         state.restrict = undefined;
         state.compiledRestrict = undefined;
@@ -417,8 +430,12 @@ export class AclCache {
     }
   }
 
-  /** Load dbacl/restrict + all ACL view rows into `state`. */
-  private async loadAll(db: string, state: DbAclState): Promise<void> {
+  /** Load dbacl/restrict + all ACL view rows, then atomically swap `state`. */
+  private async loadAll(
+    db: string,
+    state: DbAclState,
+    scanCurrentTombstones = true,
+  ): Promise<void> {
     const ddocRes = await this.admin.json<{
       dbacl?: DbAclOverlay;
       restrict?: RestrictMap;
@@ -430,16 +447,22 @@ export class AclCache {
     }
 
     const ddoc = ddocRes.body;
-    state.dbacl = ddoc.dbacl;
-    state.restrict = ddoc.restrict;
-    state.compiledRestrict = compileRestrict(ddoc.restrict);
+    const nextDbacl = ddoc.dbacl;
+    const nextRestrict = ddoc.restrict;
+    const nextCompiledRestrict = compileRestrict(ddoc.restrict);
+    const mapSource = ddoc.views?.acl?.map;
 
     // Intentional pass-through only when the ddoc has no ACL map function.
-    if (!ddoc.views?.acl?.map) {
-      state.noacl = true;
-      state.acl.clear();
-      state.tombstones?.clear();
+    if (!mapSource) {
+      state.acl = new Map();
+      state.tombstones = new Set();
       state.tombstonesLoaded = false;
+      state.aclMapSource = undefined;
+      state.generatedAclMap = false;
+      state.dbacl = nextDbacl;
+      state.restrict = nextRestrict;
+      state.compiledRestrict = nextCompiledRestrict;
+      state.noacl = true;
       return;
     }
 
@@ -475,12 +498,20 @@ export class AclCache {
       startKey = String(last.key ?? last.id);
     }
 
-    const tombstones = new Set(state.tombstones ?? []);
-    for (const id of loaded.keys()) tombstones.delete(id);
+    const mapChanged = state.aclMapSource != null && state.aclMapSource !== mapSource;
+    const shouldScanTombstones = scanCurrentTombstones || mapChanged || !state.tombstonesLoaded;
+    let tombstones: Set<string>;
 
-    if (!state.tombstonesLoaded) {
-      await this.loadCurrentTombstones(db, loaded, tombstones);
+    if (shouldScanTombstones) {
+      tombstones = new Set();
+      await this.loadCurrentTombstones(db, loaded, tombstones, {
+        recoverWithGeneratedMap: mapSource === ACL_MAP_SOURCE,
+        knownAcl: mapChanged ? undefined : state.acl,
+        knownTombstones: mapChanged ? undefined : state.tombstones,
+      });
     } else {
+      tombstones = new Set(state.tombstones ?? []);
+      for (const id of loaded.keys()) tombstones.delete(id);
       // `_design/acl` edits trigger a live-view reload. Deleted documents are
       // absent from that view, so retain only rows explicitly known to be
       // tombstones instead of silently dropping replication visibility.
@@ -490,10 +521,14 @@ export class AclCache {
       }
     }
 
-    state.acl.clear();
-    for (const [id, row] of loaded) state.acl.set(id, row);
+    state.acl = loaded;
     state.tombstones = tombstones;
     state.tombstonesLoaded = true;
+    state.aclMapSource = mapSource;
+    state.generatedAclMap = mapSource === ACL_MAP_SOURCE;
+    state.dbacl = nextDbacl;
+    state.restrict = nextRestrict;
+    state.compiledRestrict = nextCompiledRestrict;
     state.noacl = false;
   }
 
@@ -547,39 +582,35 @@ export class AclCache {
     deleted?: boolean,
     rev?: string,
   ): Promise<void> {
-    if (deleted) {
-      if (id === "_design/acl") {
-        state.acl.delete(id);
-        try {
-          await this.loadAll(db, state);
-        } catch (err) {
-          state.noacl = false;
-          this.markUnavailable(state, String(err));
-          log.warn("reload after acl ddoc delete failed", { db, err: String(err) });
-          throw new AclUnavailableError(String(err));
-        }
-        return;
+    if (id === "_design/acl") {
+      // Do not authorize against a mixed snapshot while a potentially large
+      // policy/view reload is in progress.
+      state.reloading = true;
+      state.ready = false;
+      try {
+        await this.loadAll(db, state, false);
+        state.error = undefined;
+        state.ready = true;
+        state.reloading = false;
+      } catch (err) {
+        state.noacl = false;
+        state.reloading = false;
+        this.markUnavailable(state, String(err));
+        log.warn("reload acl ddoc failed", { db, deleted: !!deleted, err: String(err) });
+        throw new AclUnavailableError(String(err));
       }
+      return;
+    }
+
+    if (deleted) {
       if (!state.acl.has(id)) {
-        const recovered = await this.recoverAclFromDeletedDoc(db, id, rev);
+        const recovered = state.generatedAclMap
+          ? await this.recoverAclFromDeletedDoc(db, id, rev)
+          : undefined;
         state.acl.set(id, recovered ?? this.deniedTombstoneRow(rev));
       }
       (state.tombstones ??= new Set()).add(id);
       // Retain last ACL grants for tombstone visibility on user _changes feeds.
-      return;
-    }
-
-    if (id === "_design/acl") {
-      try {
-        await this.loadAll(db, state);
-        state.error = undefined;
-        state.ready = true;
-      } catch (err) {
-        state.noacl = false;
-        this.markUnavailable(state, String(err));
-        log.warn("reload acl ddoc failed", { db, err: String(err) });
-        throw new AclUnavailableError(String(err));
-      }
       return;
     }
 
@@ -650,7 +681,16 @@ export class AclCache {
 
     if (row.value?.deleted) {
       const rev = row.value.rev;
-      const recovered = await this.recoverAclFromDeletedDoc(db, id, rev);
+      let recovered: AclRow | undefined;
+      try {
+        recovered = state.generatedAclMap
+          ? await this.recoverAclFromDeletedDoc(db, id, rev)
+          : undefined;
+      } catch (err) {
+        const message = `Deleted ACL unavailable in ${db}: ${String(err)}`;
+        this.markUnavailable(state, message);
+        throw new AclUnavailableError(message);
+      }
       state.acl.set(id, recovered ?? this.deniedTombstoneRow(rev));
       (state.tombstones ??= new Set()).add(id);
       return;
@@ -664,13 +704,18 @@ export class AclCache {
   }
 
   /**
-   * Reconstruct current deleted winners once after process start. `_changes`
-   * is paged and only deleted rows incur historical-revision lookups.
+   * Reconstruct current deleted winners after a full snapshot. `_changes` is
+   * paged; historical-revision lookups use bounded concurrency.
    */
   private async loadCurrentTombstones(
     db: string,
     loaded: Map<string, AclRow>,
     tombstones: Set<string>,
+    options: {
+      recoverWithGeneratedMap: boolean;
+      knownAcl?: Map<string, AclRow>;
+      knownTombstones?: Set<string>;
+    },
   ): Promise<void> {
     let since = "0";
     while (true) {
@@ -694,12 +739,27 @@ export class AclCache {
       }
 
       const results = res.body.results ?? [];
-      for (const change of results) {
-        if (!change.deleted || !change.id || change.id === "_design/acl") continue;
-        const rev = change.changes?.[0]?.rev;
-        const recovered = await this.recoverAclFromDeletedDoc(db, change.id, rev);
-        loaded.set(change.id, recovered ?? this.deniedTombstoneRow(rev));
-        tombstones.add(change.id);
+      const deleted = results.filter(
+        (change) => change.deleted && change.id && change.id !== "_design/acl",
+      );
+      for (let i = 0; i < deleted.length; i += ACL_RECOVERY_CONCURRENCY) {
+        await Promise.all(
+          deleted.slice(i, i + ACL_RECOVERY_CONCURRENCY).map(async (change) => {
+            const id = change.id!;
+            const known =
+              options.knownTombstones?.has(id) === true ? options.knownAcl?.get(id) : undefined;
+            if (known) {
+              loaded.set(id, known);
+            } else {
+              const rev = change.changes?.[0]?.rev;
+              const recovered = options.recoverWithGeneratedMap
+                ? await this.recoverAclFromDeletedDoc(db, id, rev)
+                : undefined;
+              loaded.set(id, recovered ?? this.deniedTombstoneRow(rev));
+            }
+            tombstones.add(id);
+          }),
+        );
       }
 
       const nextSince = String(res.body.last_seq ?? since);
@@ -744,44 +804,42 @@ export class AclCache {
     deletedRev?: string,
   ): Promise<AclRow | undefined> {
     if (!deletedRev) return undefined;
-    try {
-      const metaRes = await this.admin.json<{
-        _deleted?: boolean;
-        _revisions?: { start?: number; ids?: string[] };
-      }>(`/${encodeURIComponent(db)}/${encodeURIComponent(id)}`, {
-        query: { rev: deletedRev, revs: "true" },
-      });
-      if (!metaRes.ok) return undefined;
-      const start = metaRes.body._revisions?.start;
-      const ids = metaRes.body._revisions?.ids;
-      if (typeof start !== "number" || !ids || ids.length < 2) return undefined;
-      const prevRev = `${start - 1}-${ids[1]}`;
-      const prevRes = await this.admin.json<{
-        _id?: string;
-        creator?: string;
-        owners?: string[];
-        acl?: string[];
-        parent?: string;
-      }>(`/${encodeURIComponent(db)}/${encodeURIComponent(id)}`, {
-        query: { rev: prevRev },
-      });
-      if (!prevRes.ok || !prevRes.body._id) return undefined;
-      return aclRowFromDoc({
-        _id: prevRes.body._id,
-        _rev: prevRev,
-        creator: prevRes.body.creator,
-        owners: prevRes.body.owners,
-        acl: prevRes.body.acl,
-        parent: prevRes.body.parent,
-      });
-    } catch (err) {
-      log.warn("recover ACL from deleted doc failed", {
-        db,
-        id,
-        err: String(err),
-      });
-      return undefined;
+    const metaRes = await this.admin.json<{
+      _deleted?: boolean;
+      _revisions?: { start?: number; ids?: string[] };
+    }>(`/${encodeURIComponent(db)}/${encodeURIComponent(id)}`, {
+      query: { rev: deletedRev, revs: "true" },
+    });
+    if (!metaRes.ok) {
+      if (metaRes.status === 404) return undefined;
+      throw new Error(`Deleted revision metadata unavailable: ${metaRes.status}`);
     }
+    const start = metaRes.body._revisions?.start;
+    const ids = metaRes.body._revisions?.ids;
+    if (typeof start !== "number" || !ids || ids.length < 2) return undefined;
+    const prevRev = `${start - 1}-${ids[1]}`;
+    const prevRes = await this.admin.json<{
+      _id?: string;
+      creator?: string;
+      owners?: string[];
+      acl?: string[];
+      parent?: string;
+    }>(`/${encodeURIComponent(db)}/${encodeURIComponent(id)}`, {
+      query: { rev: prevRev },
+    });
+    if (!prevRes.ok) {
+      if (prevRes.status === 404) return undefined;
+      throw new Error(`Pre-delete revision unavailable: ${prevRes.status}`);
+    }
+    if (!prevRes.body._id) return undefined;
+    return aclRowFromDoc({
+      _id: prevRes.body._id,
+      _rev: prevRev,
+      creator: prevRes.body.creator,
+      owners: prevRes.body.owners,
+      acl: prevRes.body.acl,
+      parent: prevRes.body.parent,
+    });
   }
 }
 

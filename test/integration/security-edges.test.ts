@@ -414,13 +414,18 @@ describe("security edge cases", () => {
       expect(canonicalBody.rows.map((row) => row.id)).toContain(ids.bobReader);
       expect(canonicalBody.rows.map((row) => row.id)).not.toContain(ids.alicePrivate);
 
-      const encoded = await fetch(
-        `${PROXY}/${DB}/_design%2Fpublic-app/_view/by_kind?include_docs=true`,
-        { headers: authHeaders("jwt", bobJwt), redirect: "manual" },
-      );
-      expect(encoded.status).toBe(404);
-      expect(await encoded.text()).not.toContain("secret");
-      expect(encoded.headers.get("location")).toBeNull();
+      for (const path of [
+        `/${DB}/_design%2Fpublic-app/_view/by_kind?include_docs=true`,
+        `/${DB}/_design/public-app/_view%2Fby_kind?include_docs=true`,
+      ]) {
+        const encoded = await fetch(`${PROXY}${path}`, {
+          headers: authHeaders("jwt", bobJwt),
+          redirect: "manual",
+        });
+        expect(encoded.status, path).toBe(404);
+        expect(await encoded.text()).not.toContain("secret");
+        expect(encoded.headers.get("location")).toBeNull();
+      }
     });
 
     it("reduce=true / group are 501 for non-admins (not aggregate leak)", async () => {

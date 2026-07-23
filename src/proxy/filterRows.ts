@@ -57,7 +57,7 @@ export function filterRows(
     }
   }
   if (!principal.admin) {
-    const { total_rows: _totalRows, offset: _offset, ...safeBody } = body;
+    const { total_rows: _totalRows, offset: _offset, update_seq: _updateSeq, ...safeBody } = body;
     return { ...safeBody, rows };
   }
   return {

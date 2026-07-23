@@ -40,6 +40,8 @@ const ids = {
   secretAtt: `secret-att-${suiteId}`,
   tombstone: `tombstone-${suiteId}`,
   secretTomb: `secret-tomb-${suiteId}`,
+  reloadTomb: `reload-tomb-${suiteId}`,
+  reloadSecretTomb: `reload-secret-tomb-${suiteId}`,
 };
 
 async function putAppDesign(): Promise<void> {
@@ -92,6 +94,14 @@ describe("security deep edges", () => {
       [ids.secretAtt, { creator: "alice", kind: "secret-att", body: "no-bob" }],
       [ids.tombstone, { creator: "alice", acl: ["u-bob"], kind: "tomb", body: "will-delete" }],
       [ids.secretTomb, { creator: "alice", kind: "secret-tomb", body: "bob-never-saw" }],
+      [
+        ids.reloadTomb,
+        { creator: "alice", acl: ["u-bob"], kind: "reload-tomb", body: "reload-delete" },
+      ],
+      [
+        ids.reloadSecretTomb,
+        { creator: "alice", kind: "reload-secret-tomb", body: "reload-secret-delete" },
+      ],
     ];
     for (const [id, doc] of seed) {
       const res = await putDoc(DB, id, doc, authHeaders("jwt", aliceJwt));
@@ -100,6 +110,7 @@ describe("security deep edges", () => {
     await waitForReadable(DB, ids.bobReader, authHeaders("jwt", bobJwt));
     await waitForReadable(DB, ids.withAtt, authHeaders("jwt", bobJwt));
     await waitForReadable(DB, ids.tombstone, authHeaders("jwt", bobJwt));
+    await waitForReadable(DB, ids.reloadTomb, authHeaders("jwt", bobJwt));
     await waitForReadable(DB, ids.open, authHeaders("jwt", daveJwt));
 
     for (const id of [ids.withAtt, ids.secretAtt]) {
@@ -221,6 +232,32 @@ describe("security deep edges", () => {
     });
 
     it("retains tombstone ACLs after a live ACL policy reload", async () => {
+      for (const id of [ids.reloadTomb, ids.reloadSecretTomb]) {
+        const current = await getDoc(DB, id, authHeaders("jwt", aliceJwt));
+        const rev = ((await current.json()) as { _rev: string })._rev;
+        const deleted = await deleteDoc(DB, id, rev, authHeaders("jwt", aliceJwt));
+        expect(deleted.ok, `delete ${id}: ${deleted.status}`).toBe(true);
+      }
+      await waitUntil(
+        "reload tombstones applied",
+        async () => {
+          const bob = await fetch(`${PROXY}/${DB}/_changes?since=0&limit=500`, {
+            headers: authHeaders("jwt", bobJwt),
+          });
+          const alice = await fetch(`${PROXY}/${DB}/_changes?since=0&limit=500`, {
+            headers: authHeaders("jwt", aliceJwt),
+          });
+          if (!bob.ok || !alice.ok) return false;
+          const bobBody = (await bob.json()) as { results: Array<{ id: string }> };
+          const aliceBody = (await alice.json()) as { results: Array<{ id: string }> };
+          return (
+            bobBody.results.some((row) => row.id === ids.reloadTomb) &&
+            aliceBody.results.some((row) => row.id === ids.reloadSecretTomb)
+          );
+        },
+        20_000,
+      );
+
       const get = await fetch(`${PROXY}/${DB}/_design/acl`, { headers: adminHeaders() });
       const ddoc = (await get.json()) as Record<string, unknown> & {
         _rev: string;
@@ -250,10 +287,10 @@ describe("security deep edges", () => {
         const body = (await changes.json()) as {
           results: Array<{ id: string; deleted?: boolean }>;
         };
-        expect(body.results.some((row) => row.id === ids.tombstone && row.deleted === true)).toBe(
+        expect(body.results.some((row) => row.id === ids.reloadTomb && row.deleted === true)).toBe(
           true,
         );
-        expect(body.results.map((row) => row.id)).not.toContain(ids.secretTomb);
+        expect(body.results.map((row) => row.id)).not.toContain(ids.reloadSecretTomb);
 
         const probe = await fetch(`${PROXY}/${DB}/_revs_diff`, {
           method: "POST",
@@ -262,13 +299,13 @@ describe("security deep edges", () => {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            [ids.secretTomb]: ["9-probe"],
+            [ids.reloadSecretTomb]: ["9-probe"],
             [`brand-new-${suiteId}`]: ["1-new"],
           }),
         });
         expect(probe.status).toBe(200);
         const missing = (await probe.json()) as Record<string, unknown>;
-        expect(missing[ids.secretTomb]).toBeUndefined();
+        expect(missing[ids.reloadSecretTomb]).toBeUndefined();
         expect(missing[`brand-new-${suiteId}`]).toBeDefined();
       } finally {
         const latest = await fetch(`${PROXY}/${DB}/_design/acl`, {

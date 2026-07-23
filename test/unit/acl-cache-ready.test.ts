@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AclCache, AclUnavailableError, type DbAclState } from "../../src/acl/cache.js";
 import { ChangesFollower } from "../../src/acl/changesFollower.js";
+import { ACL_MAP_SOURCE } from "../../src/acl/ddoc.js";
 import { loadConfig } from "../../src/config.js";
 
 function cacheWithState(state: DbAclState): AclCache {
@@ -345,6 +346,7 @@ describe("AclCache row refresh failures", () => {
     const state: DbAclState = {
       name: "acldemo",
       acl: new Map(),
+      generatedAclMap: true,
       noacl: false,
       ready: true,
       followerUp: true,
@@ -508,7 +510,7 @@ describe("AclCache bulk load", () => {
           return {
             ok: true as const,
             status: 200,
-            body: { views: { acl: { map: "function (doc) { emit(doc._id, doc); }" } } },
+            body: { views: { acl: { map: ACL_MAP_SOURCE } } },
           };
         }
         if (path.endsWith("/_changes")) {
@@ -543,7 +545,7 @@ describe("AclCache bulk load", () => {
     });
   });
 
-  it("reconstructs deleted ACL rows from current Couch tombstones on initial load", async () => {
+  it("reconstructs newly discovered tombstones on every full snapshot reload", async () => {
     const cache = new AclCache(
       loadConfig({
         COUCH_URL: "http://127.0.0.1:5984",
@@ -553,6 +555,10 @@ describe("AclCache bulk load", () => {
     const state: DbAclState = {
       name: "restarted",
       acl: new Map(),
+      tombstones: new Set(),
+      tombstonesLoaded: true,
+      aclMapSource: ACL_MAP_SOURCE,
+      generatedAclMap: true,
       noacl: false,
       ready: false,
       followerUp: false,
@@ -564,7 +570,7 @@ describe("AclCache bulk load", () => {
           return {
             ok: true as const,
             status: 200,
-            body: { views: { acl: { map: "function (doc) { emit(doc._id, doc); }" } } },
+            body: { views: { acl: { map: ACL_MAP_SOURCE } } },
           };
         }
         if (path.endsWith("/_view/acl")) {
@@ -614,7 +620,7 @@ describe("AclCache bulk load", () => {
 
     await (
       cache as unknown as {
-        loadAll: (db: string, target: DbAclState) => Promise<void>;
+        loadAll: (db: string, target: DbAclState, scanCurrentTombstones?: boolean) => Promise<void>;
       }
     ).loadAll("restarted", state);
 
@@ -622,6 +628,67 @@ describe("AclCache bulk load", () => {
     expect(state.acl.get("deleted-private")?._r).toMatchObject({
       "u-alice": 1,
       "u-bob": 1,
+    });
+  });
+
+  it("fails closed instead of applying generated semantics to custom ACL maps", async () => {
+    const cache = new AclCache(
+      loadConfig({
+        COUCH_URL: "http://127.0.0.1:5984",
+        RATE_LIMIT_ENABLED: "false",
+      }),
+    );
+    const state: DbAclState = {
+      name: "custom-map",
+      acl: new Map(),
+      noacl: false,
+      ready: false,
+      followerUp: false,
+    };
+    const customMap = "function (doc) { emit(doc._id, {s: doc._rev, _r:{}, _w:{}, _d:{}}); }";
+    cache.adminClient.json = vi.fn(async (path: string) => {
+      if (path.endsWith("/_design/acl")) {
+        return {
+          ok: true as const,
+          status: 200,
+          body: { views: { acl: { map: customMap } } },
+        };
+      }
+      if (path.endsWith("/_view/acl")) {
+        return { ok: true as const, status: 200, body: { rows: [] } };
+      }
+      if (path.endsWith("/_changes")) {
+        return {
+          ok: true as const,
+          status: 200,
+          body: {
+            results: [
+              {
+                id: "deleted-custom",
+                deleted: true,
+                changes: [{ rev: "2-deleted" }],
+              },
+            ],
+            last_seq: "2-opaque",
+            pending: 0,
+          },
+        };
+      }
+      throw new Error("custom-map tombstones must not use document-field reconstruction");
+    }) as typeof cache.adminClient.json;
+
+    await (
+      cache as unknown as {
+        loadAll: (db: string, target: DbAclState) => Promise<void>;
+      }
+    ).loadAll("custom-map", state);
+
+    expect(state.generatedAclMap).toBe(false);
+    expect(state.tombstones?.has("deleted-custom")).toBe(true);
+    expect(state.acl.get("deleted-custom")).toMatchObject({
+      _r: {},
+      _w: {},
+      _d: {},
     });
   });
 
@@ -644,6 +711,8 @@ describe("AclCache bulk load", () => {
       acl: new Map([["deleted-private", retained]]),
       tombstones: new Set(["deleted-private"]),
       tombstonesLoaded: true,
+      aclMapSource: ACL_MAP_SOURCE,
+      generatedAclMap: true,
       noacl: false,
       ready: true,
       followerUp: true,
@@ -653,7 +722,7 @@ describe("AclCache bulk load", () => {
         return {
           ok: true as const,
           status: 200,
-          body: { views: { acl: { map: "function (doc) { emit(doc._id, doc); }" } } },
+          body: { views: { acl: { map: ACL_MAP_SOURCE } } },
         };
       }
       return { ok: true as const, status: 200, body: { rows: [] } };
@@ -661,9 +730,9 @@ describe("AclCache bulk load", () => {
 
     await (
       cache as unknown as {
-        loadAll: (db: string, target: DbAclState) => Promise<void>;
+        loadAll: (db: string, target: DbAclState, scanCurrentTombstones?: boolean) => Promise<void>;
       }
-    ).loadAll("reloaded", state);
+    ).loadAll("reloaded", state, false);
 
     expect(state.acl.get("deleted-private")).toEqual(retained);
     expect(state.tombstones?.has("deleted-private")).toBe(true);
