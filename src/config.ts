@@ -43,7 +43,11 @@ const ConfigSchema = z
       adminUrl: z.string().url(),
       usersDb: z.string().default("_users"),
       maxIdLength: z.coerce.number().int().positive().default(200),
-      sessionCacheTtlMs: z.coerce.number().int().nonnegative().default(30_000),
+      /**
+       * Principal caching delays Couch role/admin revocation. Disabled by
+       * default; deployments may explicitly accept a bounded stale window.
+       */
+      sessionCacheTtlMs: z.coerce.number().int().nonnegative().default(0),
       /** Max hashed session-cache entries (LRU). */
       sessionCacheMaxEntries: z.coerce.number().int().positive().default(10_000),
       preloadDbs: z.array(z.string()).default([]),
@@ -146,7 +150,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       adminUrl,
       usersDb: env.COUCH_USERS_DB ?? "_users",
       maxIdLength: env.COUCH_MAX_ID_LENGTH ?? 200,
-      sessionCacheTtlMs: env.SESSION_CACHE_TTL_MS ?? 30_000,
+      sessionCacheTtlMs: env.SESSION_CACHE_TTL_MS ?? 0,
       sessionCacheMaxEntries: env.SESSION_CACHE_MAX ?? 10_000,
       preloadDbs: splitCsv(env.COUCH_PRELOAD_DBS),
       aclAutoInstall: env.ACL_AUTO_INSTALL ?? true,

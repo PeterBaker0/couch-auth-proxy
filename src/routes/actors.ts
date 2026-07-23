@@ -15,6 +15,7 @@ import { AclUnavailableError, DbMissingError } from "../acl/cache.js";
 import { isDatabaseName, isDocumentId } from "../acl/names.js";
 import { dbAccessLevel, methodAllowed } from "../acl/restrict.js";
 import { canDelete, canRead, ensureDocRow, flagsForDoc } from "../acl/lookup.js";
+import { aclRowFromDoc } from "../acl/resolve.js";
 import {
   couchError,
   fetchFromCouch,
@@ -27,6 +28,7 @@ import {
   filterBulkDocs,
   filterRevsObject,
   mergeBulkResults,
+  normalizeBulkResults,
   type BulkDocsBody,
 } from "../proxy/filterBulk.js";
 import { filterChangesStream } from "../proxy/filterChanges.js";
@@ -152,6 +154,9 @@ export const actors: Record<string, Actor> = {
       return;
     }
     if (!isDatabaseName(db)) {
+      if (c.get("principal").admin) {
+        return forwardToCouch(c, c.get("config"));
+      }
       return couchError("forbidden", "Access denied.", 403);
     }
 
@@ -183,7 +188,10 @@ export const actors: Record<string, Actor> = {
     }
 
     if (state.noacl) {
-      return forwardToCouch(c, c.get("config"));
+      // Skip per-document ACL actors, but continue so route-level controls
+      // such as indexAdmin still run on pass-through/system databases.
+      await next();
+      return;
     }
 
     c.set("dbAclState", state);
@@ -199,6 +207,7 @@ export const actors: Record<string, Actor> = {
       return;
     }
     if (!validDocumentId(c, id)) {
+      if (c.get("principal").admin) return forwardToCouch(c, c.get("config"));
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
@@ -223,6 +232,7 @@ export const actors: Record<string, Actor> = {
     let bufferedBody: string | undefined;
     let deleting = false;
     let bodyParseFailed = false;
+    let parsedDocument: Record<string, unknown> | undefined;
     const principal = c.get("principal");
 
     // Direct JSON document writes can carry a tombstone. Attachments are
@@ -245,6 +255,7 @@ export const actors: Record<string, Actor> = {
           _deleted?: unknown;
         } | null;
         if (parsed && typeof parsed === "object") {
+          parsedDocument = parsed as Record<string, unknown>;
           if (!id && typeof parsed._id === "string" && parsed._id) {
             id = parsed._id;
           }
@@ -257,6 +268,7 @@ export const actors: Record<string, Actor> = {
 
     if (id) {
       if (!validDocumentId(c, id)) {
+        if (principal.admin) return forwardToCouch(c, c.get("config"));
         return couchError("not_found", "Unsupported endpoint.", 404);
       }
       await ensureDocRow(c.get("aclCache"), state, id);
@@ -279,10 +291,30 @@ export const actors: Record<string, Actor> = {
     }
 
     if (bufferedBody !== undefined) {
-      return forwardToCouch(c, c.get("config"), {
+      const config = c.get("config");
+      const upstream = await fetchFromCouch(c, config, {
         body: bufferedBody,
         headers: {
           "Content-Type": c.req.header("content-type") || "application/json",
+        },
+      });
+      if (upstream.ok && id && parsedDocument) {
+        if (deleting) {
+          const retained = state.acl.get(id);
+          if (retained) state.acl.set(id, { ...retained, deleted: true });
+        } else {
+          const aclDoc: Parameters<typeof aclRowFromDoc>[0] = { _id: id };
+          if (typeof parsedDocument._rev === "string") aclDoc._rev = parsedDocument._rev;
+          for (const field of ["creator", "owners", "acl", "parent"] as const) {
+            if (Object.hasOwn(parsedDocument, field)) aclDoc[field] = parsedDocument[field];
+          }
+          state.acl.set(id, aclRowFromDoc(aclDoc));
+        }
+      }
+      return toClientResponse(upstream, {
+        rewriteLocation: {
+          fromOrigin: new URL(config.couch.url).origin,
+          toOrigin: new URL(c.req.url).origin,
         },
       });
     }
@@ -298,6 +330,7 @@ export const actors: Record<string, Actor> = {
       return;
     }
     if (!validDocumentId(c, id)) {
+      if (c.get("principal").admin) return forwardToCouch(c, c.get("config"));
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
@@ -319,6 +352,7 @@ export const actors: Record<string, Actor> = {
       return;
     }
     if (!validDocumentId(c, id)) {
+      if (c.get("principal").admin) return forwardToCouch(c, c.get("config"));
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
@@ -338,6 +372,7 @@ export const actors: Record<string, Actor> = {
     const id = docIdFromParams(c);
     if (!state || !id) return couchError("bad_request", "missing id", 400);
     if (!validDocumentId(c, id)) {
+      if (c.get("principal").admin) return forwardToCouch(c, c.get("config"));
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
@@ -364,6 +399,7 @@ export const actors: Record<string, Actor> = {
     const config = c.get("config");
     const principal = c.get("principal");
     const isView = c.req.path.includes("/_view/");
+    const isHead = c.req.method === "HEAD";
     const maxBytes = config.server.maxBodyBytes;
 
     // POST bodies may carry keys / reduce / group (Couch merges body + query).
@@ -441,6 +477,8 @@ export const actors: Record<string, Actor> = {
     }
 
     const upstream = await fetchFromCouch(c, config, {
+      ...(isHead ? { method: "GET" } : {}),
+      stripRequestHeaders: ["if-none-match", "if-modified-since"],
       headers: {
         Accept: "application/json",
         ...(forwardBody !== undefined
@@ -462,17 +500,22 @@ export const actors: Record<string, Actor> = {
       throw err;
     }
 
-    // Only keyed queries may preserve denied slots (client already knows ids).
-    // Non-keyed POST must drop rows — placeholders would leak existing ids.
+    // Only document-id list APIs may preserve denied keyed slots. Custom view
+    // keys are arbitrary values and do not prove the caller knows row ids.
     const hasKeys =
       c.req.query("keys") != null ||
       c.req.query("key") != null ||
       requestBodyJson?.keys != null ||
       requestBodyJson?.key != null;
     const filtered = filterRows(state, principal, body, {
-      preserveDenied: hasKeys,
+      preserveDenied: hasKeys && !isView,
     });
-    return toClientResponse(upstream, { body: JSON.stringify(filtered) });
+    const response = toClientResponse(upstream, {
+      body: isHead ? null : JSON.stringify(filtered),
+      stripHeaders: ["etag", "last-modified"],
+    });
+    response.headers.set("Cache-Control", "private, no-store");
+    return response;
   },
 
   /** Proxy `_changes` and stream-filter by read ACL (all feed styles). */
@@ -487,17 +530,30 @@ export const actors: Record<string, Actor> = {
       feed !== "normal" &&
       feed !== "longpoll" &&
       feed !== "continuous" &&
+      feed !== "live" &&
       feed !== "eventsource"
     ) {
       return couchError("bad_request", "Unsupported _changes feed.", 400);
     }
-    const upstream = await fetchFromCouch(c, config);
+    const upstream = await fetchFromCouch(c, config, {
+      stripRequestHeaders: ["if-none-match", "if-modified-since"],
+    });
     if (!upstream.ok || !upstream.body) return toClientResponse(upstream);
 
-    const filtered = filterChangesStream(upstream.body, state, c.get("principal"), feed, {
-      maxBufferBytes: config.server.maxBodyBytes,
+    const filtered = filterChangesStream(
+      upstream.body,
+      state,
+      c.get("principal"),
+      feed === "live" ? "continuous" : feed,
+      {
+        maxBufferBytes: config.server.maxBodyBytes,
+      },
+    );
+    const response = toClientResponse(upstream, {
+      body: filtered,
+      stripHeaders: ["etag", "last-modified"],
     });
-    const response = toClientResponse(upstream, { body: filtered });
+    response.headers.set("Cache-Control", "private, no-store");
     if (!response.headers.has("Content-Type")) {
       response.headers.set("Content-Type", "application/json");
     }
@@ -553,14 +609,24 @@ export const actors: Record<string, Actor> = {
     if (!upstream.ok) return toClientResponse(upstream);
     let results = (await upstream.json()) as Array<Record<string, unknown>>;
     if (!Array.isArray(results)) results = [];
-    // CouchDB 3.x often returns [] for successful new_edits:false bulk writes.
-    // Synthesize ok rows so clients (PouchDB) and ACL-denied slot merging work.
-    if (results.length === 0 && filtered.allowed.length > 0) {
-      results = filtered.allowed.map((doc) => ({
-        ok: true,
-        id: doc._id,
-        rev: doc._rev,
-      }));
+    results = normalizeBulkResults(
+      filtered.allowed,
+      results,
+      String(body.new_edits) === "false",
+    );
+    for (let i = 0; i < filtered.allowed.length; i++) {
+      const doc = filtered.allowed[i];
+      const result = results[i];
+      if (!doc || typeof doc._id !== "string" || result?.error) continue;
+      if (doc._deleted) {
+        const retained = state.acl.get(doc._id);
+        if (retained) state.acl.set(doc._id, { ...retained, deleted: true });
+      } else {
+        state.acl.set(
+          doc._id,
+          aclRowFromDoc(doc as Parameters<typeof aclRowFromDoc>[0]),
+        );
+      }
     }
     return toClientResponse(upstream, {
       body: JSON.stringify(mergeBulkResults(filtered.slots, results)),
@@ -629,16 +695,23 @@ export const actors: Record<string, Actor> = {
    * Admins see DBs even when ACL ensure fails.
    */
   async dblist(c) {
+    const principal = c.get("principal");
+    if (principal.admin) return forwardToCouch(c, c.get("config"));
+
+    const isHead = c.req.method === "HEAD";
     const upstream = await fetchFromCouch(c, c.get("config"), {
+      ...(isHead ? { method: "GET" } : {}),
+      stripRequestHeaders: ["if-none-match", "if-modified-since"],
       headers: { Accept: "application/json" },
     });
     if (!upstream.ok) return toClientResponse(upstream);
-    const principal = c.get("principal");
-    if (principal.admin) return toClientResponse(upstream);
 
     const dbs = (await upstream.json()) as string[];
     if (!Array.isArray(dbs)) {
-      return toClientResponse(upstream, { body: JSON.stringify(dbs) });
+      return toClientResponse(upstream, {
+        body: isHead ? null : JSON.stringify(dbs),
+        stripHeaders: ["etag", "last-modified"],
+      });
     }
 
     const cache = c.get("aclCache");
@@ -651,7 +724,12 @@ export const actors: Record<string, Actor> = {
         }
       } catch {}
     }
-    return toClientResponse(upstream, { body: JSON.stringify(visible) });
+    const response = toClientResponse(upstream, {
+      body: isHead ? null : JSON.stringify(visible),
+      stripHeaders: ["etag", "last-modified"],
+    });
+    response.headers.set("Cache-Control", "private, no-store");
+    return response;
   },
 
   /** Mango `_find` — proxy then drop unread docs. */

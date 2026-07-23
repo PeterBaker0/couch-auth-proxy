@@ -351,10 +351,22 @@ export class AclCache {
       version.startsWith("2.1.") &&
       /Readers list can not be changed\./.test(validateSrc) &&
       (!/Parent can not be changed\./.test(validateSrc) || !/roleToken/.test(validateSrc));
-    if (!needsLegacyRewrite && !needsOwnerPolicyRewrite && !needsGlobalViewOption) return;
+    const needsV22PolicyRewrite =
+      generatedShape &&
+      version.startsWith("2.2.") &&
+      /var cr = doc\.creator, acl = doc\.acl, ow = doc\.owners/.test(mapSrc) &&
+      /if \(odc && odc != ndc\)/.test(validateSrc);
+    if (
+      !needsLegacyRewrite &&
+      !needsOwnerPolicyRewrite &&
+      !needsV22PolicyRewrite &&
+      !needsGlobalViewOption
+    ) {
+      return;
+    }
 
     const generated = buildAclDesignDoc();
-    const next = needsLegacyRewrite
+    const next = needsLegacyRewrite || needsV22PolicyRewrite
       ? {
           ...ddoc,
           _id: ddoc._id ?? generated._id,
@@ -523,7 +535,10 @@ export class AclCache {
         const recovered = await this.recoverAclFromDeletedDoc(db, id, rev);
         if (recovered) state.acl.set(id, recovered);
       }
-      // Retain last ACL grants for tombstone visibility on user _changes feeds.
+      const retained = state.acl.get(id);
+      if (retained) state.acl.set(id, { ...retained, deleted: true });
+      // Retain last ACL grants for tombstone visibility on user _changes feeds,
+      // while marking the row so children cannot inherit from a deleted parent.
       return;
     }
 

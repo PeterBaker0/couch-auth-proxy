@@ -102,6 +102,46 @@ export function mergeBulkResults(
 }
 
 /**
+ * CouchDB omits successful rows from `new_edits:false` responses and returns
+ * only per-document errors. Rebuild one result per allowed input by matching
+ * those errors by id and synthesizing the omitted successes.
+ */
+export function normalizeBulkResults(
+  allowed: BulkDoc[],
+  couchResults: Array<Record<string, unknown>>,
+  newEditsFalse: boolean,
+): Array<Record<string, unknown>> {
+  if (!newEditsFalse) return couchResults;
+
+  const byId = new Map<string, Array<Record<string, unknown>>>();
+  const unidentified: Array<Record<string, unknown>> = [];
+  for (const result of couchResults) {
+    if (typeof result.id === "string") {
+      const queued = byId.get(result.id) ?? [];
+      queued.push(result);
+      byId.set(result.id, queued);
+    } else {
+      unidentified.push(result);
+    }
+  }
+
+  return allowed.map((doc) => {
+    if (typeof doc._id === "string") {
+      const queued = byId.get(doc._id);
+      const matched = queued?.shift();
+      if (matched) return matched;
+    }
+    const fallback = unidentified.shift();
+    if (fallback) return fallback;
+    return {
+      ok: true,
+      id: doc._id,
+      rev: typeof doc._rev === "string" ? doc._rev : undefined,
+    };
+  });
+}
+
+/**
  * Filter `_revs_diff` / `_missing_revs` request keys by ACL.
  *
  * Include ids the principal may read **or** write/delete. Push replication

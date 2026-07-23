@@ -287,6 +287,7 @@ describe("AclCache row refresh failures", () => {
 
     expect(state.acl.has("secret")).toBe(true);
     expect(state.acl.get("secret")?._r["u-bob"]).toBe(1);
+    expect(state.acl.get("secret")?.deleted).toBe(true);
   });
 
   it("deletes ACL rows when the view confirms absence", async () => {
@@ -393,6 +394,7 @@ describe("AclCache row refresh failures", () => {
 
     expect(state.acl.get("cold")?._r["u-bob"]).toBe(1);
     expect(state.acl.get("cold")?._w["u-alice"]).toBe(1);
+    expect(state.acl.get("cold")?.deleted).toBe(true);
   });
 });
 

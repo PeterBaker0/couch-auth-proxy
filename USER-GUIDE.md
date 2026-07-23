@@ -98,7 +98,7 @@ Auth is Couch-native (`POST /_session`, cookie, Basic, or Bearer JWT validated b
 | Token                      | Meaning                                                  |
 | -------------------------- | -------------------------------------------------------- |
 | `u-<name>` / bare `<name>` | That user (`sub` / session name)                         |
-| `r-<role>` / bare `<role>` | That Couch role (from JWT roles claim or `_users` roles) |
+| `r-<role>`                  | That Couch role (from JWT roles claim or `_users` roles) |
 | `r-*`                      | Any **authenticated** DB user (not anonymous)If          |
 | `_admin` role              | Server admin — full bypass                               |
 
@@ -151,6 +151,8 @@ These are ordinary JSON fields—not a separate doc type. The `_design/acl` map 
 
 **Important:** `acl: []` _is_ a grant source (empty readers). That means **no one** gets read via the doc row—useful for hiding design docs. Omitting `acl` is not the same as `acl: []`.
 
+ACL fields are type-checked: `creator` must be a non-empty string, `acl` / `owners` must be arrays of non-empty strings, and `parent` must be a string. Malformed present fields are rejected and index fail-closed. Non-admins cannot add a creator or an empty grant field to an existing open document.
+
 ### Design documents
 
 | Doc                   | Role                                                                                                                                                                                                   |
@@ -162,7 +164,7 @@ Unsupported / unsafe for non-admins: `_list`, `_show` / `_update` without a doc 
 
 ### Local docs (`_local/…`)
 
-Used for PouchDB sync checkpoints. After the DB gate, members can read/write `_local` docs (Couch checkpoint semantics). Do not put secrets you would not share among DB members there.
+Used for PouchDB sync checkpoints. After the DB gate, members can read/write/copy `_local` docs (Couch checkpoint semantics). Do not put secrets you would not share among DB members there.
 
 ### System databases
 
@@ -179,7 +181,7 @@ For a non-admin principal matching the listed grant:
 | `creator`                        | ✓                            | ✓              | ✓      | ✓            | creator only (owners/acl); creator immutable |
 | `owners`                         | ✓                            | ✓              | ✗      | ✓            | ✗                                            |
 | `acl` (reader)                   | ✓                            | ✗              | ✗      | ✗            | ✗                                            |
-| `r-*` open doc (no grant fields) | ✓                            | ✓              | ✓      | —            | —                                            |
+| `r-*` open doc (no grant fields) | ✓                            | ✓              | ✓      | ✗            | ✗                                            |
 | via `parent` only                | union of parent’s grants     | same           | same   | —            | —                                            |
 | via `dbacl` overlay              | extra flags on **every** doc | same           | same   | —            | —                                            |
 
@@ -276,11 +278,11 @@ Creators (and owners, for `acl`) update the same document:
 { "creator": "alice", "acl": ["u-bob", "r-readers"], "body": "…" }
 ```
 
-Revocation is the same write with a narrower list. Expect visibility to drop on the next filtered `_changes` / pull for removed readers.
+Revocation is the same write with a narrower list. New proxy reads and filtered changes stop exposing the document immediately after the ACL update. Bytes already copied into an offline/local database cannot be remotely erased; applications must treat client replicas as disclosed data and apply their own local cleanup policy.
 
 ### 5. Design your views for filtered clients
 
-Non-admins never see denied docs in view/`_all_docs`/`_changes` results. Design indexes around keys you query (`key` / `keys`), not around assuming `limit=N` returns N visible rows—after ACL filtering, pages may under-deliver.
+Non-admins never see denied docs in view/`_all_docs`/`_changes` results. Design indexes around keys you query (`key` / `keys`), not around assuming `limit=N` returns N visible rows—after ACL filtering, pages may under-deliver. `_all_docs` may preserve `not_found` slots for caller-supplied document ids; custom views drop denied matches because a view key is not a document id. Linked-view rows require access to both the source and the embedded document.
 
 Avoid `reduce`/`group` for end-user traffic through the proxy.
 
@@ -329,7 +331,7 @@ Either tag docs `"acl": ["r-readers"]`, or set `dbacl._r: ["r-readers"]` once on
 - On create, set `creator` to the current user; never trust client-supplied creator for others.
 - Use `acl` for readers, `owners` for collaborators, `creator` for lifecycle/delete.
 - Treat `404` on GET as “not visible or missing”; do not retry as a different privilege probe.
-- Prefer keyed queries; tolerate shorter pages after ACL filtering.
+- Prefer keyed queries; tolerate shorter pages after ACL filtering. Custom-view keys never reveal denied row ids.
 - Sync clients: expect partial datasets and filtered live changes.
 - Keep end-user traffic on mapped, filterable APIs (docs, views with `reduce=false`, `_find`, `_changes`)—not admin or unmapped endpoints (default-deny **404**).
 

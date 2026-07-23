@@ -3,7 +3,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { filterRows } from "../../src/proxy/filterRows.js";
-import { filterBulkDocs, filterRevsObject, mergeBulkResults } from "../../src/proxy/filterBulk.js";
+import {
+  filterBulkDocs,
+  filterRevsObject,
+  mergeBulkResults,
+  normalizeBulkResults,
+} from "../../src/proxy/filterBulk.js";
 import { filterFindDocs } from "../../src/proxy/filterFind.js";
 import { aclRowFromDoc } from "../../src/acl/resolve.js";
 import { isDocumentId } from "../../src/acl/names.js";
@@ -74,6 +79,20 @@ describe("filterRows", () => {
       { id: "b", key: "b" },
     ]);
   });
+
+  it("drops linked-view rows when the embedded document is unreadable", () => {
+    const out = filterRows(state, principal("bob"), {
+      rows: [
+        {
+          id: "b",
+          key: "linked",
+          value: { _id: "a" },
+          doc: { _id: "a", secret: "must-not-leak" },
+        },
+      ],
+    });
+    expect(out.rows).toEqual([]);
+  });
 });
 
 describe("filterBulkDocs", () => {
@@ -105,6 +124,29 @@ describe("filterBulkDocs", () => {
     }));
     const merged = mergeBulkResults(filtered.slots, synthesized);
     expect(merged).toEqual([{ ok: true, id: "a", rev: "2-xyz" }]);
+  });
+
+  it("aligns mixed new_edits:false errors by id instead of position", () => {
+    const allowed = [
+      { _id: "ok-first", _rev: "1-ok" },
+      { _id: "bad-second", _rev: "2-bad" },
+    ];
+    const normalized = normalizeBulkResults(
+      allowed,
+      [{ id: "bad-second", error: "forbidden", reason: "validation" }],
+      true,
+    );
+    expect(normalized).toEqual([
+      { ok: true, id: "ok-first", rev: "1-ok" },
+      { id: "bad-second", error: "forbidden", reason: "validation" },
+    ]);
+
+    const merged = mergeBulkResults(
+      [{ id: "acl-denied", error: "forbidden" }, null, null],
+      normalized,
+    );
+    expect(merged[1]?.id).toBe("ok-first");
+    expect(merged[2]).toMatchObject({ id: "bad-second", error: "forbidden" });
   });
 
   it("rejects reserved or oversized ids before they reach Couch", () => {

@@ -9,6 +9,7 @@ import { createApp, createServices } from "../../src/app.js";
 import { buildPrincipal } from "../../src/auth/principal.js";
 import type { Principal } from "../../src/auth/types.js";
 import { loadConfig } from "../../src/config.js";
+import { toClientResponse } from "../../src/proxy/forward.js";
 
 function bobPrincipal() {
   return buildPrincipal({
@@ -129,6 +130,21 @@ describe("single-document authorization hardening", () => {
     expect(res.status).toBe(403);
     expect(upstream).not.toHaveBeenCalled();
   });
+
+  it("protects GET and HEAD update-handler invocations too", async () => {
+    const state = stateWith([{ _id: "shared", creator: "alice", acl: ["u-bob"] }]);
+    const { app } = appWithState(state);
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    for (const method of ["GET", "HEAD"]) {
+      const res = await app.request("http://localhost/docs/_design/app/_update/touch/shared", {
+        method,
+      });
+      expect(res.status, method).toBe(403);
+    }
+    expect(upstream).not.toHaveBeenCalled();
+  });
 });
 
 describe("_bulk_docs input validation", () => {
@@ -204,7 +220,7 @@ describe("replication revision probes", () => {
 });
 
 describe("Couch response compatibility", () => {
-  it("preserves end-to-end Couch headers on filtered responses", async () => {
+  it("drops shared validators on identity-filtered responses", async () => {
     const state = stateWith([
       { _id: "private", creator: "alice" },
       { _id: "shared", creator: "alice", acl: ["u-bob"] },
@@ -212,7 +228,8 @@ describe("Couch response compatibility", () => {
     const { app } = appWithState(state);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => {
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        expect(new Headers(init?.headers).has("if-none-match")).toBe(false);
         return new Response(
           JSON.stringify({
             total_rows: 2,
@@ -233,13 +250,52 @@ describe("Couch response compatibility", () => {
       }),
     );
 
-    const res = await app.request("http://localhost/docs/_all_docs");
+    const res = await app.request("http://localhost/docs/_all_docs", {
+      headers: { "If-None-Match": '"previous-principal-etag"' },
+    });
     expect(res.status).toBe(200);
-    expect(res.headers.get("etag")).toBe('"couch-etag"');
+    expect(res.headers.get("etag")).toBeNull();
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
     expect(res.headers.get("x-couch-request-id")).toBe("request-123");
     expect(res.headers.get("connection")).toBeNull();
     const body = (await res.json()) as { rows: Array<{ id: string }> };
     expect(body.rows.map((row) => row.id)).toEqual(["shared"]);
+  });
+
+  it("fetches and filters GET representation for HEAD row endpoints", async () => {
+    const state = stateWith([{ _id: "shared", creator: "alice", acl: ["u-bob"] }]);
+    const { app } = appWithState(state);
+    const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method).toBe("GET");
+      return new Response(
+        JSON.stringify({
+          rows: [{ id: "shared", key: "shared", value: { rev: "1-a" } }],
+        }),
+        { headers: { "Content-Type": "application/json", ETag: '"upstream"' } },
+      );
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/_all_docs", { method: "HEAD" });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBeNull();
+    expect(await res.text()).toBe("");
+    expect(upstream).toHaveBeenCalledOnce();
+  });
+
+  it("removes compressed framing when the fetch layer decoded the body", async () => {
+    const res = toClientResponse(
+      new Response("decoded", {
+        headers: {
+          "Content-Encoding": "gzip",
+          "Content-Length": "42",
+          "Content-Type": "text/plain",
+        },
+      }),
+    );
+    expect(res.headers.get("content-encoding")).toBeNull();
+    expect(res.headers.get("content-length")).toBeNull();
+    expect(await res.text()).toBe("decoded");
   });
 });
 
@@ -263,6 +319,65 @@ describe("admin forwarding", () => {
       error: "bad_request",
       reason: "Invalid request path",
     });
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("passes official routes shadowed by generic patterns for admins", async () => {
+    const admin = buildPrincipal({
+      ok: true,
+      userCtx: { name: "admin", roles: ["_admin"] },
+      info: { authenticated: "default" },
+    });
+    const { app } = appWithState(stateWith([]), 200, admin);
+    const upstream = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", upstream);
+
+    expect((await app.request("http://localhost/_membership")).status).toBe(200);
+    expect((await app.request("http://localhost/docs/_shards")).status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("strips spoofed forwarded-host headers and rewrites Couch Location", async () => {
+    const { app } = appWithState(stateWith([]));
+    const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.has("x-forwarded-host")).toBe(false);
+      expect(headers.has("x-forwarded-proto")).toBe(false);
+      return new Response("{}", {
+        status: 201,
+        headers: { Location: "http://127.0.0.1:5984/docs/new" },
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/new", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Forwarded-Host": "attacker.example",
+        "X-Forwarded-Proto": "https",
+      },
+      body: JSON.stringify({ creator: "bob" }),
+    });
+    expect(res.status).toBe(201);
+    expect(res.headers.get("location")).toBe("http://localhost/docs/new");
+  });
+});
+
+describe("no-ACL database route policy", () => {
+  it("still enforces proxy admin-only routes", async () => {
+    const state = stateWith([]);
+    state.noacl = true;
+    const { app } = appWithState(state);
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/_index", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index: { fields: ["kind"] } }),
+    });
+    expect(res.status).toBe(403);
     expect(upstream).not.toHaveBeenCalled();
   });
 });

@@ -47,7 +47,9 @@ export function resolveDocAcl(params: {
       // Row present → deny-by-default, then union grants from doc + parent.
       acl._r = acl._w = acl._d = false;
       applyTokens(acl, row, principal.aclTokens);
-      if (parentRow) applyTokens(acl, parentRow, principal.aclTokens);
+      // A deleted parent is retained only so prior readers can receive its
+      // tombstone. It no longer exists and cannot grant access to children.
+      if (parentRow && !parentRow.deleted) applyTokens(acl, parentRow, principal.aclTokens);
     }
   }
 
@@ -73,7 +75,14 @@ function applyTokens(acl: AclFlags, row: AclRow, tokens: string[]): void {
 
 /** OR-in matching tokens from the bucket-level `dbacl` overlay. */
 function applyDbacl(acl: AclFlags, dbacl: DbAclOverlay, tokens: string[]): void {
-  const asSet = (arr?: string[]) => new Set(arr ?? []);
+  // Match document/restrict semantics: bare grants are usernames, while roles
+  // must be explicitly prefixed with `r-`.
+  const asSet = (arr?: string[]) =>
+    new Set(
+      (arr ?? [])
+        .filter((token): token is string => typeof token === "string" && token.length > 0)
+        .map((token) => (/^[ru]-/.test(token) ? token : `u-${token}`)),
+    );
   const readers = asSet(dbacl._r);
   const writers = asSet(dbacl._w);
   const deleters = asSet(dbacl._d);
@@ -97,10 +106,10 @@ function applyDbacl(acl: AclFlags, dbacl: DbAclOverlay, tokens: string[]): void 
 export function aclRowFromDoc(doc: {
   _id: string;
   _rev?: string;
-  creator?: string;
-  owners?: string[];
-  acl?: string[];
-  parent?: string;
+  creator?: unknown;
+  owners?: unknown;
+  acl?: unknown;
+  parent?: unknown;
   _local_seq?: string | number;
 }): AclRow {
   const row: AclRow = {
@@ -111,33 +120,33 @@ export function aclRowFromDoc(doc: {
     _d: {},
   };
 
-  let grantSourceCount = 0;
+  const hasCreator = Object.hasOwn(doc, "creator");
+  const hasOwners = Object.hasOwn(doc, "owners");
+  const hasAcl = Object.hasOwn(doc, "acl");
+  const grantSourceCount = Number(hasCreator) + Number(hasOwners) + Number(hasAcl);
   const asUser = (v: string) => (v.startsWith("u-") ? v : `u-${v}`);
   const asUserOrRole = (v: string) => (v.startsWith("u-") || v.startsWith("r-") ? v : `u-${v}`);
 
-  if (typeof doc.creator === "string" && doc.creator) {
+  if (hasCreator && typeof doc.creator === "string" && doc.creator) {
     const userToken = asUser(doc.creator);
     row._r[userToken] = row._w[userToken] = row._d[userToken] = 1;
-    grantSourceCount += 1;
   }
 
-  if (Array.isArray(doc.acl)) {
+  if (hasAcl && Array.isArray(doc.acl)) {
     for (const raw of doc.acl) {
       if (typeof raw !== "string") continue;
       const token = raw.startsWith("r-") || raw.startsWith("u-") ? raw : `u-${raw}`;
       row._r[token] = 1;
     }
-    grantSourceCount += 1;
   }
 
-  if (Array.isArray(doc.owners)) {
+  if (hasOwners && Array.isArray(doc.owners)) {
     for (const raw of doc.owners) {
       if (typeof raw !== "string") continue;
       const token = asUserOrRole(raw);
       row._r[token] = 1;
       row._w[token] = 1;
     }
-    grantSourceCount += 1;
   }
 
   if (!grantSourceCount) {

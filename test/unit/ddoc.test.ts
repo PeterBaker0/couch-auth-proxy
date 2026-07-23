@@ -6,7 +6,7 @@ import { loadConfig } from "../../src/config.js";
 describe("generated ACL design document", () => {
   it("leaves delete authorization to proxy r/w/d resolution", () => {
     const ddoc = buildAclDesignDoc();
-    expect(ddoc.version).toBe("2.2.0");
+    expect(ddoc.version).toBe("2.3.0");
     expect(ddoc.options.partitioned).toBe(false);
     expect(VALIDATE_DOC_UPDATE_SOURCE).not.toContain("You can't delete doc");
     expect(VALIDATE_DOC_UPDATE_SOURCE).toContain("Creator can not be changed");
@@ -42,6 +42,51 @@ describe("generated ACL design document", () => {
       denied = err;
     }
     expect(denied).toEqual({ forbidden: "Parent can not be changed." });
+  });
+
+  it("prevents claiming creator-less documents and rejects malformed ACL metadata", () => {
+    const validate = Function(`return (${VALIDATE_DOC_UPDATE_SOURCE});`)() as (
+      next: Record<string, unknown>,
+      old: Record<string, unknown> | null,
+      user: { name: string; roles: string[] },
+      security: Record<string, unknown>,
+    ) => void;
+    const open = { _id: "open", body: "before" };
+
+    expect(() =>
+      validate({ ...open, body: "ordinary edit" }, open, { name: "bob", roles: [] }, {}),
+    ).not.toThrow();
+    expect(() =>
+      validate({ ...open, creator: "bob" }, open, { name: "bob", roles: [] }, {}),
+    ).toThrow();
+    expect(() =>
+      validate({ ...open, acl: [] }, open, { name: "bob", roles: [] }, {}),
+    ).toThrow();
+    expect(() =>
+      validate({ _id: "new", acl: "bob" }, null, { name: "bob", roles: [] }, {}),
+    ).toThrow();
+  });
+
+  it("compares owner arrays without comma-collision ambiguity", () => {
+    const validate = Function(`return (${VALIDATE_DOC_UPDATE_SOURCE});`)() as (
+      next: Record<string, unknown>,
+      old: Record<string, unknown> | null,
+      user: { name: string; roles: string[] },
+      security: Record<string, unknown>,
+    ) => void;
+    const old = {
+      _id: "shared",
+      creator: "alice",
+      owners: ["u-bob", "u-charlie,u-dave"],
+    };
+    expect(() =>
+      validate(
+        { ...old, owners: ["u-bob,u-charlie", "u-dave"] },
+        old,
+        { name: "bob", roles: [] },
+        {},
+      ),
+    ).toThrow();
   });
 
   it("upgrades legacy generated rules without discarding bucket policy", async () => {
@@ -89,7 +134,7 @@ describe("generated ACL design document", () => {
     expect(upgraded).toMatchObject({
       _id: "_design/acl",
       _rev: "4-old",
-      version: "2.2.0",
+      version: "2.3.0",
       acl: ["u-ops"],
       dbacl: { _r: ["r-support"] },
       restrict: { "*": ["r-members"] },
@@ -140,7 +185,7 @@ describe("generated ACL design document", () => {
     expect(written).toMatchObject({
       _id: "_design/acl",
       _rev: "3-old",
-      version: "2.2.0",
+      version: "2.3.0",
       views: old.views,
     });
     expect(String(written?.validate_doc_update)).toContain("roleToken");
@@ -189,5 +234,57 @@ describe("generated ACL design document", () => {
     expect(upgraded.options).toMatchObject({ local_seq: true, partitioned: false });
     expect((upgraded.views as { acl: { map: string } }).acl.map).toBe(map);
     expect(upgraded.validate_doc_update).toBe(validate);
+  });
+
+  it("upgrades generated v2.2 ACL policy while preserving custom views", async () => {
+    const cache = new AclCache(
+      loadConfig({
+        COUCH_URL: "http://127.0.0.1:5984",
+        RATE_LIMIT_ENABLED: "false",
+      }),
+    );
+    let written: Record<string, unknown> | undefined;
+    cache.adminClient.fetch = vi.fn(async (_path: string, init?: RequestInit) => {
+      written = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response("{}", { status: 201 });
+    }) as typeof cache.adminClient.fetch;
+    const old = {
+      _id: "_design/acl",
+      _rev: "5-old",
+      version: "2.2.0",
+      type: "ddoc",
+      acl: [],
+      options: { local_seq: true, partitioned: false },
+      views: {
+        acl: {
+          map: "function (doc) { var cr = doc.creator, acl = doc.acl, ow = doc.owners; emit(doc._id, {}); }",
+        },
+        custom: { map: "function (doc) { emit(doc.kind, 1); }" },
+      },
+      validate_doc_update:
+        "function (nd, od) { var odc = od.creator; var ndc = nd.creator; if (odc && odc != ndc) throw({forbidden:'Creator can not be changed.'}); }",
+    };
+
+    await (
+      cache as unknown as {
+        maybeMigrateStamp: (db: string, response: Response) => Promise<void>;
+      }
+    ).maybeMigrateStamp(
+      "docs",
+      new Response(JSON.stringify(old), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    expect(written).toMatchObject({
+      _id: "_design/acl",
+      _rev: "5-old",
+      version: "2.3.0",
+    });
+    const views = written?.views as Record<string, unknown>;
+    expect(views.custom).toEqual(old.views.custom);
+    expect(String((views.acl as { map: string }).map)).toContain("hasCr");
+    expect(String(written?.validate_doc_update)).toContain("Creator must be a non-empty string");
   });
 });
