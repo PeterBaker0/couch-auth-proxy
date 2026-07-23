@@ -58,6 +58,35 @@ function docIdFromParams(c: AppContext): string {
   return "";
 }
 
+/** Apply Couch endpoint classification plus the configured document-id ceiling. */
+function validDocumentId(c: AppContext, id: string): boolean {
+  return isDocumentId(id, c.get("config").couch.maxIdLength);
+}
+
+/**
+ * Parse Couch's `Destination: doc-id[?rev=…]` COPY header.
+ *
+ * The destination is one URL-encoded id in the current DB. Reject absolute,
+ * root-relative, and unencoded multi-segment paths so authorization cannot be
+ * performed against a different id than Couch ultimately writes.
+ */
+function copyDestinationId(rawHeader: string): string | undefined {
+  const raw = rawHeader.trim();
+  if (!raw || raw.startsWith("/") || raw.includes("://") || raw.includes("#")) {
+    return undefined;
+  }
+  const queryIndex = raw.indexOf("?");
+  const encodedId = queryIndex >= 0 ? raw.slice(0, queryIndex) : raw;
+  if (!encodedId || encodedId.includes("/") || encodedId.includes("\\")) {
+    return undefined;
+  }
+  try {
+    return decodeURIComponent(encodedId);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Path + query after `/{db}`, used for `restrict` method matching. */
 function urlAfterDb(c: AppContext, db: string): string {
   const query = c.req.url.includes("?") ? `?${c.req.url.split("?")[1]}` : "";
@@ -169,7 +198,7 @@ export const actors: Record<string, Actor> = {
       await next();
       return;
     }
-    if (!isDocumentId(id)) {
+    if (!validDocumentId(c, id)) {
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
@@ -192,8 +221,16 @@ export const actors: Record<string, Actor> = {
 
     let id = docIdFromParams(c);
     let bufferedBody: string | undefined;
+    let deleting = false;
+    let bodyParseFailed = false;
+    const principal = c.get("principal");
 
-    if (!id && c.req.method === "POST") {
+    // Direct JSON document writes can carry a tombstone. Attachments are
+    // arbitrary bytes and use the route method for delete authorization.
+    const inspectBody =
+      !principal.admin &&
+      (c.req.method === "POST" || (c.req.method === "PUT" && c.req.param("attachment") == null));
+    if (inspectBody) {
       try {
         bufferedBody = await readTextLimited(c.req.raw, c.get("config").server.maxBodyBytes);
       } catch (err) {
@@ -203,28 +240,42 @@ export const actors: Record<string, Actor> = {
         throw err;
       }
       try {
-        const parsed = JSON.parse(bufferedBody || "null") as { _id?: unknown } | null;
-        if (parsed && typeof parsed._id === "string" && parsed._id) {
-          id = parsed._id;
+        const parsed = JSON.parse(bufferedBody || "null") as {
+          _id?: unknown;
+          _deleted?: unknown;
+        } | null;
+        if (parsed && typeof parsed === "object") {
+          if (!id && typeof parsed._id === "string" && parsed._id) {
+            id = parsed._id;
+          }
+          deleting = parsed._deleted === true;
         }
       } catch {
-        // Invalid JSON — let Couch return its native error.
-        return forwardToCouch(c, c.get("config"), {
-          body: bufferedBody,
-          headers: {
-            "Content-Type": c.req.header("content-type") || "application/json",
-          },
-        });
+        bodyParseFailed = true;
       }
     }
 
     if (id) {
-      if (!isDocumentId(id)) {
+      if (!validDocumentId(c, id)) {
         return couchError("not_found", "Unsupported endpoint.", 404);
       }
       await ensureDocRow(c.get("aclCache"), state, id);
-      const flags = flagsForDoc(state, c.get("principal"), id);
-      if (!flags._w) return couchError("forbidden", "ACL", 403);
+      const flags = flagsForDoc(state, principal, id);
+      if (deleting ? !flags._d : !flags._w) {
+        return couchError("forbidden", "ACL", 403);
+      }
+    }
+
+    if (bodyParseFailed) {
+      const contentType = c.req.header("content-type")?.toLowerCase() ?? "";
+      if (contentType.startsWith("multipart/")) {
+        return couchError(
+          "not_implemented",
+          "Multipart document writes are unsupported for non-admins. Use JSON documents and attachment endpoints.",
+          415,
+        );
+      }
+      return couchError("bad_request", "Invalid JSON document.", 400);
     }
 
     if (bufferedBody !== undefined) {
@@ -246,7 +297,7 @@ export const actors: Record<string, Actor> = {
       await next();
       return;
     }
-    if (!isDocumentId(id)) {
+    if (!validDocumentId(c, id)) {
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
@@ -257,8 +308,8 @@ export const actors: Record<string, Actor> = {
   },
 
   /**
-   * Design `_update` handler: authorize with **read** (not write).
-   * Matches couch-auth-proxy / Couch update-function ACL semantics.
+   * Design `_update` handlers can arbitrarily write or delete their target.
+   * Require both write and delete so a handler cannot elevate a reader/owner.
    */
   async docUpdate(c, next) {
     const state = c.get("dbAclState");
@@ -267,13 +318,15 @@ export const actors: Record<string, Actor> = {
       await next();
       return;
     }
-    if (!isDocumentId(id)) {
+    if (!validDocumentId(c, id)) {
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
-    if (!canRead(state, c.get("principal"), id)) {
+    const flags = flagsForDoc(state, c.get("principal"), id);
+    if (!flags._r) {
       return couchError("not_found", "missing", 404);
     }
+    if (!flags._w || !flags._d) return couchError("forbidden", "ACL", 403);
     await next();
   },
 
@@ -284,7 +337,7 @@ export const actors: Record<string, Actor> = {
     const state = c.get("dbAclState");
     const id = docIdFromParams(c);
     if (!state || !id) return couchError("bad_request", "missing id", 400);
-    if (!isDocumentId(id)) {
+    if (!validDocumentId(c, id)) {
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
@@ -293,7 +346,10 @@ export const actors: Record<string, Actor> = {
     }
     const destHeader = c.req.header("Destination") || c.req.header("destination");
     if (!destHeader) return couchError("bad_request", "Destination header required", 400);
-    const destId = decodeURIComponent(destHeader.split("/").pop() || destHeader);
+    const destId = copyDestinationId(destHeader);
+    if (!destId || !validDocumentId(c, destId)) {
+      return couchError("bad_request", "Invalid COPY destination", 400);
+    }
     await ensureDocRow(c.get("aclCache"), state, destId);
     const destFlags = flagsForDoc(state, c.get("principal"), destId);
     if (!destFlags._w) return couchError("forbidden", "ACL", 403);
@@ -476,15 +532,20 @@ export const actors: Record<string, Actor> = {
       }
       return couchError("bad_request", "Invalid format.", 400);
     }
+    if (!body || typeof body !== "object" || !Array.isArray(body.docs)) {
+      return couchError("bad_request", "Invalid format.", 400);
+    }
 
     const cache = c.get("aclCache");
     await Promise.all(
       (body.docs ?? [])
-        .filter((doc) => doc && typeof doc._id === "string")
+        .filter((doc) => doc && typeof doc._id === "string" && validDocumentId(c, doc._id))
         .map((doc) => ensureDocRow(cache, state, doc._id!)),
     );
 
-    const filtered = filterBulkDocs(state, c.get("principal"), body);
+    const filtered = filterBulkDocs(state, c.get("principal"), body, (id) =>
+      validDocumentId(c, id),
+    );
     const atomic = String(body.all_or_nothing) === "true";
     if (atomic && filtered.hadDenied) {
       return couchError("forbidden", "ACL rejected transaction.", 403);
@@ -554,7 +615,9 @@ export const actors: Record<string, Actor> = {
       }
       return couchError("bad_request", "Invalid format.", 400);
     }
-    const filtered = filterRevsObject(state, c.get("principal"), body);
+    const filtered = filterRevsObject(state, c.get("principal"), body, (id) =>
+      validDocumentId(c, id),
+    );
     const upstream = await fetchFromCouch(c, c.get("config"), {
       body: JSON.stringify(filtered),
       headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -599,8 +662,44 @@ export const actors: Record<string, Actor> = {
     const state = c.get("dbAclState");
     if (!state) return forwardToCouch(c, c.get("config"));
     const config = c.get("config");
+
+    let requestBodyText: string;
+    try {
+      requestBodyText = await readTextLimited(c.req.raw, config.server.maxBodyBytes);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        return couchError("bad_request", "Request body too large", 413);
+      }
+      throw err;
+    }
+
+    let forwardBody = requestBodyText;
+    let injectedId = false;
+    try {
+      const requestBody = JSON.parse(requestBodyText || "null") as Record<string, unknown> | null;
+      if (
+        requestBody &&
+        Array.isArray(requestBody.fields) &&
+        requestBody.fields.length > 0 &&
+        requestBody.fields.every((field) => typeof field === "string") &&
+        !requestBody.fields.includes("_id")
+      ) {
+        forwardBody = JSON.stringify({
+          ...requestBody,
+          fields: [...requestBody.fields, "_id"],
+        });
+        injectedId = true;
+      }
+    } catch {
+      // Preserve malformed input so Couch returns its native JSON error.
+    }
+
     const upstream = await fetchFromCouch(c, config, {
-      headers: { Accept: "application/json" },
+      body: forwardBody,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": c.req.header("content-type") || "application/json",
+      },
     });
     if (!upstream.ok) return toClientResponse(upstream);
     let body: FindResponse;
@@ -614,7 +713,11 @@ export const actors: Record<string, Actor> = {
       }
       throw err;
     }
-    return jsonResponse(filterFindDocs(state, c.get("principal"), body), upstream.status);
+    const filtered = filterFindDocs(state, c.get("principal"), body);
+    if (injectedId) {
+      filtered.docs = filtered.docs.map(({ _id: _injectedId, ...doc }) => doc);
+    }
+    return jsonResponse(filtered, upstream.status);
   },
 
   /** Mango index management — admin only. */

@@ -6,6 +6,7 @@ import { filterRows } from "../../src/proxy/filterRows.js";
 import { filterBulkDocs, filterRevsObject, mergeBulkResults } from "../../src/proxy/filterBulk.js";
 import { filterFindDocs } from "../../src/proxy/filterFind.js";
 import { aclRowFromDoc } from "../../src/acl/resolve.js";
+import { isDocumentId } from "../../src/acl/names.js";
 import { buildPrincipal } from "../../src/auth/principal.js";
 import type { DbAclState } from "../../src/acl/cache.js";
 
@@ -104,6 +105,20 @@ describe("filterBulkDocs", () => {
     }));
     const merged = mergeBulkResults(filtered.slots, synthesized);
     expect(merged).toEqual([{ ok: true, id: "a", rev: "2-xyz" }]);
+  });
+
+  it("rejects reserved or oversized ids before they reach Couch", () => {
+    const filtered = filterBulkDocs(
+      state,
+      principal("bob"),
+      {
+        docs: [{ _id: "_purged_infos_limit" }, { _id: "long-document-id" }, { _id: "new" }],
+      },
+      (id) => isDocumentId(id, 5),
+    );
+    expect(filtered.allowed.map((doc) => doc._id)).toEqual(["new"]);
+    expect(filtered.slots[0]?.error).toBe("forbidden");
+    expect(filtered.slots[1]?.error).toBe("forbidden");
   });
 });
 

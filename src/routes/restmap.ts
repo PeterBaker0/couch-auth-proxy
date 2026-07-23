@@ -12,12 +12,11 @@ export type ActorName =
   | "pipe"
   | "admin"
   | "session"
-  | "auth"
   | "db"
   | "doc"
   | "docWrite"
   | "docDelete"
-  | "docUpdate" // update handler: authorize with READ
+  | "docUpdate" // update handler: require read/write/delete
   | "rows"
   | "changes"
   | "bulk"
@@ -28,8 +27,7 @@ export type ActorName =
   | "unsupported"
   | "find"
   | "indexAdmin"
-  | "copy"
-  | "notFound";
+  | "copy";
 
 export type HttpMethod = "get" | "post" | "put" | "delete" | "head" | "copy";
 

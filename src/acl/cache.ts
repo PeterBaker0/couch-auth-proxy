@@ -32,6 +32,7 @@ type EnsureDdocResult =
   | { kind: "absent" };
 
 const log = createLogger("acl-cache");
+const ACL_VIEW_PAGE_SIZE = 2_000;
 
 /** Mutable per-DB ACL state held in the process. */
 export type DbAclState = {
@@ -144,17 +145,26 @@ export class AclCache {
   async refreshDoc(db: string, docId: string): Promise<void> {
     const state = this.dbs.get(db);
     if (!state || state.noacl) return;
-    const result = await fetchAclRow(this.admin, db, docId);
+    let result;
+    try {
+      result = await fetchAclRow(this.admin, db, docId);
+    } catch (err) {
+      const message = `ACL row unavailable in ${db}: ${String(err)}`;
+      this.markUnavailable(state, message);
+      throw new AclUnavailableError(message);
+    }
     if (!result.ok) {
-      log.warn("refreshDoc view fetch failed; leaving cache unchanged", {
+      const message = `ACL row unavailable in ${db}: ${result.status}`;
+      this.markUnavailable(state, message);
+      log.warn("refreshDoc view fetch failed; failing closed", {
         db,
         docId,
         status: result.status,
       });
-      return;
+      throw new AclUnavailableError(message);
     }
     if (result.row) state.acl.set(docId, result.row);
-    // Confirmed absence: leave missing (create path); do not invent a row.
+    else state.acl.delete(docId);
   }
 
   /**
@@ -272,28 +282,62 @@ export class AclCache {
     throw new Error(`Failed to read _design/acl in ${db}: ${get.status}`);
   }
 
-  /** Migrate legacy map that stamped `s` from `_local_seq` → `_rev`. */
+  /**
+   * Upgrade generated ACL ddocs while preserving bucket policy/custom views.
+   * v2.0 used `_rev` stamps but its VDU incorrectly overrode proxy delete
+   * grants from parent/dbacl; older versions also used `_local_seq`.
+   */
   private async maybeMigrateStamp(db: string, getRes: Response): Promise<void> {
     const ddoc = (await getRes.json()) as {
+      _id?: string;
       _rev?: string;
       version?: string;
-      views?: { acl?: { map?: string } };
+      type?: string;
+      acl?: unknown;
+      options?: Record<string, unknown>;
+      views?: Record<string, unknown> & { acl?: { map?: string } };
+      validate_doc_update?: string;
+      [key: string]: unknown;
     };
     const mapSrc = ddoc.views?.acl?.map ?? "";
+    const version = typeof ddoc.version === "string" ? ddoc.version : "";
+    const generatedShape = ddoc.type === "ddoc" && Array.isArray(ddoc.acl) && version.length > 0;
+    const legacyGeneratedVersion = generatedShape && /^(?:1\.|2\.0\.)/.test(version);
+    const needsGlobalViewOption =
+      generatedShape && version.startsWith("2.1.") && ddoc.options?.partitioned !== false;
     const usesLocalSeq = /_local_seq/.test(mapSrc) && !/doc\._rev/.test(mapSrc);
-    const alreadyV2 = typeof ddoc.version === "string" && ddoc.version.startsWith("2.");
-    if (!usesLocalSeq || alreadyV2) return;
+    const hasLegacyDeleteRule = /You can't delete doc\./.test(ddoc.validate_doc_update ?? "");
+    const needsLegacyRewrite = legacyGeneratedVersion && (usesLocalSeq || hasLegacyDeleteRule);
+    if (!needsLegacyRewrite && !needsGlobalViewOption) return;
 
-    const next = buildAclDesignDoc("2.0.0");
+    const generated = buildAclDesignDoc();
+    const next = needsLegacyRewrite
+      ? {
+          ...ddoc,
+          _id: ddoc._id ?? generated._id,
+          _rev: ddoc._rev,
+          language: generated.language,
+          options: { ...ddoc.options, ...generated.options },
+          type: generated.type,
+          version: generated.version,
+          stamp: generated.stamp,
+          views: { ...ddoc.views, acl: generated.views.acl },
+          validate_doc_update: generated.validate_doc_update,
+        }
+      : {
+          ...ddoc,
+          options: { ...ddoc.options, partitioned: false },
+          stamp: generated.stamp,
+        };
     const put = await this.admin.fetch(`/${encodeURIComponent(db)}/_design/acl`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...next, _rev: ddoc._rev }),
+      body: JSON.stringify(next),
     });
     if (!put.ok) {
-      log.warn("ddoc migrate skipped", { db, status: put.status });
+      throw new Error(`Failed to upgrade _design/acl in ${db}: ${put.status}`);
     } else {
-      log.info("migrated _design/acl stamp to _rev", { db });
+      log.info("upgraded _design/acl", { db, version: generated.version });
     }
   }
 
@@ -321,20 +365,40 @@ export class AclCache {
       return;
     }
 
-    const res = await this.admin.json<{
-      rows: Array<{ id: string; key: string; value: AclRow }>;
-    }>(`/${encodeURIComponent(db)}/_design/acl/_view/acl`, {
-      query: { reduce: "false", include_docs: "false" },
-    });
+    // Page the view so one large database cannot create an unbounded response
+    // body. Build separately and swap only after every page succeeds.
+    const loaded = new Map<string, AclRow>();
+    let startKey: string | undefined;
+    while (true) {
+      const query: Record<string, string> = {
+        reduce: "false",
+        include_docs: "false",
+        limit: String(ACL_VIEW_PAGE_SIZE),
+      };
+      if (startKey !== undefined) {
+        query.startkey = JSON.stringify(startKey);
+        query.skip = "1";
+      }
+      const res = await this.admin.json<{
+        rows: Array<{ id: string; key: string; value: AclRow }>;
+      }>(`/${encodeURIComponent(db)}/_design/acl/_view/acl`, { query });
 
-    if (!res.ok) {
-      throw new Error(`ACL view unavailable in ${db}: ${res.status} ${res.text}`);
+      if (!res.ok) {
+        throw new Error(`ACL view unavailable in ${db}: ${res.status} ${res.text}`);
+      }
+
+      const rows = res.body.rows ?? [];
+      for (const row of rows) {
+        loaded.set(String(row.key ?? row.id), row.value);
+      }
+      if (rows.length < ACL_VIEW_PAGE_SIZE) break;
+      const last = rows.at(-1);
+      if (!last) break;
+      startKey = String(last.key ?? last.id);
     }
 
     state.acl.clear();
-    for (const row of res.body.rows ?? []) {
-      state.acl.set(String(row.key ?? row.id), row.value);
-    }
+    for (const [id, row] of loaded) state.acl.set(id, row);
     state.noacl = false;
   }
 
@@ -354,6 +418,11 @@ export class AclCache {
         },
         onError: () => {
           state.followerUp = false;
+          // A per-row refresh failure marks the whole state unavailable. Repair
+          // it with a fresh snapshot instead of waiting for unrelated traffic.
+          if (!state.ready || state.error) {
+            void this.ensureDb(db);
+          }
         },
         onUp: () => {
           state.followerUp = true;
@@ -389,10 +458,10 @@ export class AclCache {
         try {
           await this.loadAll(db, state);
         } catch (err) {
-          state.ready = false;
-          state.error = String(err);
           state.noacl = false;
+          this.markUnavailable(state, String(err));
           log.warn("reload after acl ddoc delete failed", { db, err: String(err) });
+          throw new AclUnavailableError(String(err));
         }
         return;
       }
@@ -410,26 +479,43 @@ export class AclCache {
         state.error = undefined;
         state.ready = true;
       } catch (err) {
-        state.ready = false;
-        state.error = String(err);
         state.noacl = false;
+        this.markUnavailable(state, String(err));
         log.warn("reload acl ddoc failed", { db, err: String(err) });
+        throw new AclUnavailableError(String(err));
       }
       return;
     }
 
-    const result = await fetchAclRow(this.admin, db, id);
+    let result;
+    try {
+      result = await fetchAclRow(this.admin, db, id);
+    } catch (err) {
+      const message = `ACL row refresh failed in ${db}: ${String(err)}`;
+      this.markUnavailable(state, message);
+      throw new AclUnavailableError(message);
+    }
     if (!result.ok) {
-      // Leave previous ACL in place — deleting would open write for unknown ids.
-      log.warn("applyChange view fetch failed; leaving cache unchanged", {
+      // Retain the row for a later full reload, but stop authorizing from stale
+      // state. Throwing also makes the follower reconnect and report itself down.
+      const message = `ACL row refresh failed in ${db}: ${result.status}`;
+      this.markUnavailable(state, message);
+      log.warn("applyChange view fetch failed; failing closed", {
         db,
         id,
         status: result.status,
       });
-      return;
+      throw new AclUnavailableError(message);
     }
     if (result.row) state.acl.set(id, result.row);
     else state.acl.delete(id);
+  }
+
+  /** Mark a DB unusable until `ensureDb` completes a fresh full reload. */
+  private markUnavailable(state: DbAclState, message: string): void {
+    state.ready = false;
+    state.error = message;
+    state.followerUp = false;
   }
 
   /**
@@ -467,6 +553,7 @@ export class AclCache {
       if (!prevRes.ok || !prevRes.body._id) return undefined;
       return aclRowFromDoc({
         _id: prevRes.body._id,
+        _rev: prevRev,
         creator: prevRes.body.creator,
         owners: prevRes.body.owners,
         acl: prevRes.body.acl,

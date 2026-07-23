@@ -14,6 +14,7 @@ import {
   authHeaders,
   collectChangesFeed,
   createUserIfMissing,
+  deleteDoc,
   ensureDaveMembership,
   ensureDbOpenForDemoUsers,
   getAttachment,
@@ -619,7 +620,7 @@ describe("security edge cases", () => {
       expect(body.id).toBe(ids.bobReader);
     });
 
-    it("_update with unread docId is 404; reader may invoke on readable doc", async () => {
+    it("_update with unread docId is 404; reader cannot invoke mutating handler", async () => {
       const denied = await fetch(
         `${PROXY}/${DB}/_design/app/_update/touch/${encodeURIComponent(ids.alicePrivate)}`,
         { method: "POST", headers: authHeaders("jwt", bobJwt) },
@@ -630,9 +631,8 @@ describe("security edge cases", () => {
         `${PROXY}/${DB}/_design/app/_update/touch/${encodeURIComponent(ids.bobReader)}`,
         { method: "POST", headers: authHeaders("jwt", bobJwt) },
       );
-      // update handlers authorize with READ by design; Couch applies the mutation
-      expect(allowed.status).toBeGreaterThanOrEqual(200);
-      expect(allowed.status).toBeLessThan(300);
+      // Update handlers may write or delete arbitrary output, so read alone is insufficient.
+      expect(allowed.status).toBe(403);
     });
 
     it("_explain is admin-only (no index metadata leak)", async () => {
@@ -740,6 +740,21 @@ describe("security edge cases", () => {
       expect(carol.status).toBe(404);
     });
 
+    it("owner cannot bypass delete ACL with a PUT tombstone", async () => {
+      const docRes = await getDoc(DB, ids.bobOwner, authHeaders("jwt", bobJwt));
+      const doc = (await docRes.json()) as Record<string, unknown>;
+      const res = await fetch(`${PROXY}/${DB}/${encodeURIComponent(ids.bobOwner)}`, {
+        method: "PUT",
+        headers: {
+          ...authHeaders("jwt", bobJwt),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ ...doc, _deleted: true }),
+      });
+      expect(res.status).toBe(403);
+      expect((await getDoc(DB, ids.bobOwner, authHeaders("jwt", bobJwt))).status).toBe(200);
+    });
+
     it("non-admin cannot PUT design docs", async () => {
       const res = await fetch(`${PROXY}/${DB}/_design/evil`, {
         method: "PUT",
@@ -764,6 +779,61 @@ describe("security edge cases", () => {
         },
       });
       expect(res.status).toBe(403);
+    });
+
+    it("COPY authorizes the destination id before its rev query", async () => {
+      const existing = await getDoc(DB, ids.alicePrivate, authHeaders("jwt", aliceJwt));
+      const rev = ((await existing.json()) as { _rev: string })._rev;
+      const res = await fetch(`${PROXY}/${DB}/${encodeURIComponent(ids.bobReader)}`, {
+        method: "COPY",
+        headers: {
+          ...authHeaders("jwt", bobJwt),
+          Destination: `${encodeURIComponent(ids.alicePrivate)}?rev=${encodeURIComponent(rev)}`,
+        },
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("COPY rejects absolute and cross-database destinations", async () => {
+      for (const destination of [
+        `${DB}-other/copied`,
+        `/${DB}/copied`,
+        `https://example.test/${DB}/copied`,
+      ]) {
+        const res = await fetch(`${PROXY}/${DB}/${encodeURIComponent(ids.bobReader)}`, {
+          method: "COPY",
+          headers: {
+            ...authHeaders("jwt", bobJwt),
+            Destination: destination,
+          },
+        });
+        expect(res.status, destination).toBe(400);
+      }
+    });
+
+    it("parent-inherited delete is enforced by the proxy and accepted by Couch", async () => {
+      const parentId = `delete-parent-${suiteId}`;
+      const childId = `delete-child-${suiteId}`;
+      const parent = await putDoc(
+        DB,
+        parentId,
+        { creator: "bob", kind: "delete-parent" },
+        authHeaders("jwt", bobJwt),
+      );
+      expect(parent.ok).toBe(true);
+      const child = await putDoc(
+        DB,
+        childId,
+        { creator: "alice", parent: parentId, kind: "delete-child" },
+        authHeaders("jwt", aliceJwt),
+      );
+      expect(child.ok).toBe(true);
+      await waitForReadable(DB, childId, authHeaders("jwt", bobJwt));
+
+      const current = await getDoc(DB, childId, authHeaders("jwt", aliceJwt));
+      const rev = ((await current.json()) as { _rev: string })._rev;
+      const deleted = await deleteDoc(DB, childId, rev, authHeaders("jwt", bobJwt));
+      expect(deleted.ok, `inherited delete: ${deleted.status} ${await deleted.text()}`).toBe(true);
     });
 
     it("restrict.* hides DB from _all_dbs and returns 404 on access", async () => {

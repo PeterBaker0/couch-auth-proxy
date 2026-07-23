@@ -1,7 +1,7 @@
 /**
  * In-process rate limiting middleware (global + per-IP sliding windows).
  *
- * Global overload returns 502 (`service_unavailable`); per-IP excess returns
+ * Global overload returns 503 (`service_unavailable`); per-IP excess returns
  * 429. Client IP resolution respects `TRUST_PROXY_HOPS` (0 = ignore spoofable
  * forwarding headers). Suitable for single-process deployments; use an edge
  * limiter when running multiple replicas.
@@ -14,7 +14,7 @@ type Bucket = { count: number; resetAt: number };
 
 /**
  * Simple in-process rate limiter (global + per-IP).
- * Returns 502 for global overload and 429 for per-IP (legacy used 420).
+ * Returns 503 for global overload and 429 for per-IP (legacy used 420).
  */
 export function rateLimit() {
   const globalBucket: Bucket = { count: 0, resetAt: 0 };
@@ -34,7 +34,7 @@ export function rateLimit() {
     }
     globalBucket.count += 1;
     if (globalBucket.count > cfg.maxRequests) {
-      return c.json({ error: "service_unavailable", reason: "rate limit" }, 502);
+      return c.json({ error: "service_unavailable", reason: "rate limit" }, 503);
     }
 
     const ip = resolveClientIp(c.req.raw.headers, c.get("config").server.trustProxyHops);
