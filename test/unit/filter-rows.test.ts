@@ -35,16 +35,30 @@ describe("filterRows", () => {
     { _id: "b", creator: "alice", acl: ["u-bob"] },
   ]);
 
-  it("strips unauthorized rows", () => {
+  it("strips unauthorized rows and unfiltered corpus metadata", () => {
     const out = filterRows(state, principal("bob"), {
       total_rows: 2,
+      offset: 4,
+      update_seq: "9-opaque",
       rows: [
         { id: "a", key: "a", value: { rev: "1" } },
         { id: "b", key: "b", value: { rev: "1" } },
       ],
     });
     expect(out.rows.map((r) => r.id)).toEqual(["b"]);
+    expect(out.total_rows).toBeUndefined();
+    expect(out.offset).toBeUndefined();
+    expect(out.update_seq).toBeUndefined();
+  });
+
+  it("preserves corpus metadata for administrators", () => {
+    const out = filterRows(state, principal("admin", ["_admin"]), {
+      total_rows: 2,
+      offset: 1,
+      rows: [{ id: "a" }, { id: "b" }],
+    });
     expect(out.total_rows).toBe(2);
+    expect(out.offset).toBe(1);
   });
 
   it("drops id-less reduce/group aggregate rows", () => {
@@ -130,8 +144,10 @@ describe("filterFindDocs", () => {
     ]);
     const out = filterFindDocs(state, principal("bob"), {
       docs: [{ _id: "a" }, { _id: "b" }],
+      execution_stats: { total_docs_examined: 2 },
     });
     expect(out.docs.map((d) => d._id)).toEqual(["b"]);
+    expect(out.execution_stats).toBeUndefined();
   });
 
   it("drops docs without _id (fail closed)", () => {

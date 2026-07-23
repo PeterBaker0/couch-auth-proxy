@@ -15,7 +15,7 @@
  */
 
 /** Build a fresh `_design/acl` document (no `_rev`; caller supplies on update). */
-export function buildAclDesignDoc(version = "2.2.0") {
+export function buildAclDesignDoc(version = "2.3.0") {
   return {
     _id: "_design/acl",
     language: "javascript",
@@ -130,7 +130,7 @@ export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
       var ndp = typeof nd.parent == S ? nd.parent : "";
 
       if (!nd._deleted) {
-        if (odc && odc != ndc) throw { forbidden: "Creator can not be changed." };
+        if (odc != ndc) throw { forbidden: "Creator can not be changed." };
         if (notCreator && odw + "" != ndw + "")
           throw { forbidden: "Owners list can not be changed." };
         if (notOwner && oda != nda)

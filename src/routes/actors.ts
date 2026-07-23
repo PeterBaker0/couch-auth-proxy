@@ -11,7 +11,12 @@
  */
 import type { Context, Next } from "hono";
 import type { AppEnv } from "../middleware/context.js";
-import { AclUnavailableError, DbMissingError } from "../acl/cache.js";
+import {
+  AclUnavailableError,
+  DbMissingError,
+  type AclCache,
+  type DbAclState,
+} from "../acl/cache.js";
 import { isDatabaseName, isDocumentId } from "../acl/names.js";
 import { dbAccessLevel, methodAllowed } from "../acl/restrict.js";
 import { canDelete, canRead, ensureDocRow, flagsForDoc } from "../acl/lookup.js";
@@ -39,6 +44,9 @@ import {
 } from "../util/limitStream.js";
 
 type AppContext = Context<AppEnv>;
+const ACL_LOOKUP_CONCURRENCY = 16;
+const DESIGN_API_ATTACHMENT =
+  /^_(?:view|list|show|update|search|search_info|nouveau|nouveau_info|rewrite|info)(?:\/|$)/;
 
 /** One restmap middleware step. */
 export type Actor = (c: AppContext, next: Next) => Promise<Response | void>;
@@ -60,7 +68,38 @@ function docIdFromParams(c: AppContext): string {
 
 /** Apply Couch endpoint classification plus the configured document-id ceiling. */
 function validDocumentId(c: AppContext, id: string): boolean {
+  // Hono decodes route params but matches against the encoded path. Without
+  // this guard, `/_design%2Fapp/_view/name` matches the generic
+  // `/:docId/:attachment` route, authorizes only the readable design doc, and
+  // pipes an otherwise ACL-filtered view directly to Couch. Reserved document
+  // prefixes must use their canonical, explicitly classified route shapes.
+  if (id.startsWith("_design/") && c.req.param("ddoc") == null) return false;
+  if (id.startsWith("_local/")) return false;
+  const attachment = c.req.param("attachment");
+  if (c.req.param("ddoc") != null && attachment != null && DESIGN_API_ATTACHMENT.test(attachment)) {
+    return false;
+  }
   return isDocumentId(id, c.get("config").couch.maxIdLength);
+}
+
+/** Refresh unique ACL ids with bounded Couch admin-request fan-out. */
+async function ensureDocRows(
+  cache: AclCache,
+  state: DbAclState,
+  ids: Iterable<string>,
+): Promise<void> {
+  const pending = [...new Set(ids)];
+  let index = 0;
+  const workers = Array.from(
+    { length: Math.min(ACL_LOOKUP_CONCURRENCY, pending.length) },
+    async () => {
+      while (index < pending.length) {
+        const id = pending[index++]!;
+        await ensureDocRow(cache, state, id);
+      }
+    },
+  );
+  await Promise.all(workers);
 }
 
 /**
@@ -174,7 +213,7 @@ export const actors: Record<string, Actor> = {
     const level = dbAccessLevel(principal, state.compiledRestrict, state.noacl);
     if (level === 0) {
       // Hide restricted DBs as not_found (same as missing).
-      return couchError("not_found", "ACL", 404);
+      return couchError("not_found", "Database does not exist.", 404);
     }
 
     const after = urlAfterDb(c, db);
@@ -349,6 +388,12 @@ export const actors: Record<string, Actor> = {
     const destId = copyDestinationId(destHeader);
     if (!destId || !validDocumentId(c, destId)) {
       return couchError("bad_request", "Invalid COPY destination", 400);
+    }
+    const queryIndex = destHeader.indexOf("?");
+    const destinationPath =
+      `/${encodeURIComponent(destId)}` + (queryIndex >= 0 ? destHeader.slice(queryIndex) : "");
+    if (!methodAllowed(c.get("principal"), state.compiledRestrict, "PUT", destinationPath)) {
+      return couchError("forbidden", "Method restricted.", 403);
     }
     await ensureDocRow(c.get("aclCache"), state, destId);
     const destFlags = flagsForDoc(state, c.get("principal"), destId);
@@ -526,10 +571,12 @@ export const actors: Record<string, Actor> = {
     }
 
     const cache = c.get("aclCache");
-    await Promise.all(
+    await ensureDocRows(
+      cache,
+      state,
       (body.docs ?? [])
         .filter((doc) => doc && typeof doc._id === "string" && validDocumentId(c, doc._id))
-        .map((doc) => ensureDocRow(cache, state, doc._id!)),
+        .map((doc) => doc._id!),
     );
 
     const filtered = filterBulkDocs(state, c.get("principal"), body, (id) =>
@@ -572,8 +619,38 @@ export const actors: Record<string, Actor> = {
     const state = c.get("dbAclState");
     if (!state) return forwardToCouch(c, c.get("config"));
     const config = c.get("config");
+
+    let requestBodyText: string;
+    try {
+      requestBodyText = await readTextLimited(c.req.raw, config.server.maxBodyBytes);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        return couchError("bad_request", "Request body too large", 413);
+      }
+      throw err;
+    }
+    let requestedIds: string[] = [];
+    try {
+      const request = JSON.parse(requestBodyText || "null") as {
+        docs?: Array<{ id?: unknown }>;
+      } | null;
+      if (request && Array.isArray(request.docs)) {
+        requestedIds = request.docs
+          .map((doc) => doc?.id)
+          .filter((id): id is string => typeof id === "string" && validDocumentId(c, id));
+      }
+    } catch {
+      // Let Couch return its native malformed-body response.
+    }
+    const cache = c.get("aclCache");
+    await ensureDocRows(cache, state, requestedIds);
+
     const upstream = await fetchFromCouch(c, config, {
-      headers: { Accept: "application/json" },
+      body: requestBodyText,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": c.req.header("content-type") || "application/json",
+      },
     });
     if (!upstream.ok) return toClientResponse(upstream);
     let body: { results?: Array<{ id: string; docs: unknown[] }> };
@@ -609,10 +686,10 @@ export const actors: Record<string, Actor> = {
       return couchError("bad_request", "Invalid format.", 400);
     }
     const cache = c.get("aclCache");
-    await Promise.all(
-      Object.keys(body)
-        .filter((id) => validDocumentId(c, id))
-        .map((id) => ensureDocRow(cache, state, id)),
+    await ensureDocRows(
+      cache,
+      state,
+      Object.keys(body).filter((id) => validDocumentId(c, id)),
     );
     const filtered = filterRevsObject(state, c.get("principal"), body, (id) =>
       validDocumentId(c, id),
@@ -636,7 +713,17 @@ export const actors: Record<string, Actor> = {
     const principal = c.get("principal");
     if (principal.admin) return toClientResponse(upstream);
 
-    const dbs = (await upstream.json()) as string[];
+    let dbs: string[];
+    try {
+      dbs = JSON.parse(
+        await readResponseTextLimited(upstream, c.get("config").server.maxBodyBytes),
+      ) as string[];
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        return couchError("bad_request", "Response body too large", 413);
+      }
+      throw err;
+    }
     if (!Array.isArray(dbs)) {
       return toClientResponse(upstream, { body: JSON.stringify(dbs) });
     }

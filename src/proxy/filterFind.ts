@@ -17,7 +17,8 @@ export type FindResponse = {
 };
 
 /**
- * Drop docs the principal cannot read; preserve bookmark / stats fields.
+ * Drop docs the principal cannot read. Preserve paging fields, but omit
+ * unfiltered execution statistics for non-admins.
  */
 export function filterFindDocs(
   state: DbAclState,
@@ -29,5 +30,9 @@ export function filterFindDocs(
     if (!id || typeof id !== "string") return false;
     return canRead(state, principal, id);
   });
+  if (!principal.admin) {
+    const { execution_stats: _executionStats, ...safeBody } = body;
+    return { ...safeBody, docs };
+  }
   return { ...body, docs };
 }

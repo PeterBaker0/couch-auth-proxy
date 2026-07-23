@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AclCache, AclUnavailableError, type DbAclState } from "../../src/acl/cache.js";
 import { ChangesFollower } from "../../src/acl/changesFollower.js";
+import { ACL_MAP_SOURCE } from "../../src/acl/ddoc.js";
 import { loadConfig } from "../../src/config.js";
 
 function cacheWithState(state: DbAclState): AclCache {
@@ -336,6 +337,50 @@ describe("AclCache row refresh failures", () => {
     expect(state.acl.has("gone")).toBe(false);
   });
 
+  it("derives a shipped-map ACL row when the live view index briefly lags", async () => {
+    const cache = cacheWithState({
+      name: "acldemo",
+      acl: new Map(),
+      generatedAclMap: true,
+      noacl: false,
+      ready: true,
+      followerUp: true,
+    });
+    cache.adminClient.json = vi.fn(async (path: string) => {
+      if (path.endsWith("/_view/acl")) {
+        return {
+          ok: true as const,
+          status: 200,
+          body: { rows: [{ key: "fresh", error: "not_found" }] },
+        };
+      }
+      if (path.endsWith("/_all_docs")) {
+        return {
+          ok: true as const,
+          status: 200,
+          body: { rows: [{ id: "fresh", value: { rev: "1-fresh" } }] },
+        };
+      }
+      return {
+        ok: true as const,
+        status: 200,
+        body: {
+          _id: "fresh",
+          _rev: "1-fresh",
+          creator: "alice",
+          acl: ["u-bob"],
+        },
+      };
+    }) as typeof cache.adminClient.json;
+
+    await cache.refreshDoc("acldemo", "fresh");
+
+    expect(cache.get("acldemo")?.acl.get("fresh")?._r).toMatchObject({
+      "u-alice": 1,
+      "u-bob": 1,
+    });
+  });
+
   it("recovers ACL from pre-delete revision when cache was cold", async () => {
     const config = loadConfig({
       COUCH_URL: "http://127.0.0.1:5984",
@@ -345,6 +390,7 @@ describe("AclCache row refresh failures", () => {
     const state: DbAclState = {
       name: "acldemo",
       acl: new Map(),
+      generatedAclMap: true,
       noacl: false,
       ready: true,
       followerUp: true,
@@ -508,7 +554,14 @@ describe("AclCache bulk load", () => {
           return {
             ok: true as const,
             status: 200,
-            body: { views: { acl: { map: "function (doc) { emit(doc._id, doc); }" } } },
+            body: { views: { acl: { map: ACL_MAP_SOURCE } } },
+          };
+        }
+        if (path.endsWith("/_changes")) {
+          return {
+            ok: true as const,
+            status: 200,
+            body: { results: [], last_seq: "2001-final", pending: 0 },
           };
         }
         viewQueries.push(init?.query);
@@ -534,5 +587,198 @@ describe("AclCache bulk load", () => {
       startkey: JSON.stringify("doc-1999"),
       skip: "1",
     });
+  });
+
+  it("reconstructs newly discovered tombstones on every full snapshot reload", async () => {
+    const cache = new AclCache(
+      loadConfig({
+        COUCH_URL: "http://127.0.0.1:5984",
+        RATE_LIMIT_ENABLED: "false",
+      }),
+    );
+    const state: DbAclState = {
+      name: "restarted",
+      acl: new Map(),
+      tombstones: new Set(),
+      tombstonesLoaded: true,
+      aclMapSource: ACL_MAP_SOURCE,
+      generatedAclMap: true,
+      noacl: false,
+      ready: false,
+      followerUp: false,
+    };
+
+    cache.adminClient.json = vi.fn(
+      async (path: string, init?: { query?: Record<string, string> }) => {
+        if (path.endsWith("/_design/acl")) {
+          return {
+            ok: true as const,
+            status: 200,
+            body: { views: { acl: { map: ACL_MAP_SOURCE } } },
+          };
+        }
+        if (path.endsWith("/_view/acl")) {
+          return { ok: true as const, status: 200, body: { rows: [] } };
+        }
+        if (path.endsWith("/_changes")) {
+          return {
+            ok: true as const,
+            status: 200,
+            body: {
+              results: [
+                {
+                  id: "deleted-private",
+                  deleted: true,
+                  changes: [{ rev: "2-deleted" }],
+                },
+              ],
+              last_seq: "4-opaque",
+              pending: 0,
+            },
+          };
+        }
+        if (init?.query?.rev === "2-deleted") {
+          return {
+            ok: true as const,
+            status: 200,
+            body: {
+              _deleted: true,
+              _revisions: { start: 2, ids: ["deleted", "original"] },
+            },
+          };
+        }
+        if (init?.query?.rev === "1-original") {
+          return {
+            ok: true as const,
+            status: 200,
+            body: {
+              _id: "deleted-private",
+              creator: "alice",
+              acl: ["u-bob"],
+            },
+          };
+        }
+        return { ok: false as const, status: 404, text: "missing" };
+      },
+    ) as typeof cache.adminClient.json;
+
+    await (
+      cache as unknown as {
+        loadAll: (db: string, target: DbAclState, scanCurrentTombstones?: boolean) => Promise<void>;
+      }
+    ).loadAll("restarted", state);
+
+    expect(state.tombstones?.has("deleted-private")).toBe(true);
+    expect(state.acl.get("deleted-private")?._r).toMatchObject({
+      "u-alice": 1,
+      "u-bob": 1,
+    });
+  });
+
+  it("fails closed instead of applying generated semantics to custom ACL maps", async () => {
+    const cache = new AclCache(
+      loadConfig({
+        COUCH_URL: "http://127.0.0.1:5984",
+        RATE_LIMIT_ENABLED: "false",
+      }),
+    );
+    const state: DbAclState = {
+      name: "custom-map",
+      acl: new Map(),
+      noacl: false,
+      ready: false,
+      followerUp: false,
+    };
+    const customMap = "function (doc) { emit(doc._id, {s: doc._rev, _r:{}, _w:{}, _d:{}}); }";
+    cache.adminClient.json = vi.fn(async (path: string) => {
+      if (path.endsWith("/_design/acl")) {
+        return {
+          ok: true as const,
+          status: 200,
+          body: { views: { acl: { map: customMap } } },
+        };
+      }
+      if (path.endsWith("/_view/acl")) {
+        return { ok: true as const, status: 200, body: { rows: [] } };
+      }
+      if (path.endsWith("/_changes")) {
+        return {
+          ok: true as const,
+          status: 200,
+          body: {
+            results: [
+              {
+                id: "deleted-custom",
+                deleted: true,
+                changes: [{ rev: "2-deleted" }],
+              },
+            ],
+            last_seq: "2-opaque",
+            pending: 0,
+          },
+        };
+      }
+      throw new Error("custom-map tombstones must not use document-field reconstruction");
+    }) as typeof cache.adminClient.json;
+
+    await (
+      cache as unknown as {
+        loadAll: (db: string, target: DbAclState) => Promise<void>;
+      }
+    ).loadAll("custom-map", state);
+
+    expect(state.generatedAclMap).toBe(false);
+    expect(state.tombstones?.has("deleted-custom")).toBe(true);
+    expect(state.acl.get("deleted-custom")).toMatchObject({
+      _r: {},
+      _w: {},
+      _d: {},
+    });
+  });
+
+  it("retains known tombstone rows across ACL design-document reloads", async () => {
+    const cache = new AclCache(
+      loadConfig({
+        COUCH_URL: "http://127.0.0.1:5984",
+        RATE_LIMIT_ENABLED: "false",
+      }),
+    );
+    const retained = {
+      s: "1-original",
+      p: "",
+      _r: { "u-alice": 1 as const, "u-bob": 1 as const },
+      _w: { "u-alice": 1 as const },
+      _d: { "u-alice": 1 as const },
+    };
+    const state: DbAclState = {
+      name: "reloaded",
+      acl: new Map([["deleted-private", retained]]),
+      tombstones: new Set(["deleted-private"]),
+      tombstonesLoaded: true,
+      aclMapSource: ACL_MAP_SOURCE,
+      generatedAclMap: true,
+      noacl: false,
+      ready: true,
+      followerUp: true,
+    };
+    cache.adminClient.json = vi.fn(async (path: string) => {
+      if (path.endsWith("/_design/acl")) {
+        return {
+          ok: true as const,
+          status: 200,
+          body: { views: { acl: { map: ACL_MAP_SOURCE } } },
+        };
+      }
+      return { ok: true as const, status: 200, body: { rows: [] } };
+    }) as typeof cache.adminClient.json;
+
+    await (
+      cache as unknown as {
+        loadAll: (db: string, target: DbAclState, scanCurrentTombstones?: boolean) => Promise<void>;
+      }
+    ).loadAll("reloaded", state, false);
+
+    expect(state.acl.get("deleted-private")).toEqual(retained);
+    expect(state.tombstones?.has("deleted-private")).toBe(true);
   });
 });
