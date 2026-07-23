@@ -300,28 +300,35 @@ export class AclCache {
       [key: string]: unknown;
     };
     const mapSrc = ddoc.views?.acl?.map ?? "";
-    const knownGeneratedVersion =
-      ddoc.type === "ddoc" &&
-      Array.isArray(ddoc.acl) &&
-      typeof ddoc.version === "string" &&
-      /^(?:1\.|2\.0\.)/.test(ddoc.version);
+    const version = typeof ddoc.version === "string" ? ddoc.version : "";
+    const generatedShape = ddoc.type === "ddoc" && Array.isArray(ddoc.acl) && version.length > 0;
+    const legacyGeneratedVersion = generatedShape && /^(?:1\.|2\.0\.)/.test(version);
+    const needsGlobalViewOption =
+      generatedShape && /^2\.1\./.test(version) && ddoc.options?.partitioned !== false;
     const usesLocalSeq = /_local_seq/.test(mapSrc) && !/doc\._rev/.test(mapSrc);
     const hasLegacyDeleteRule = /You can't delete doc\./.test(ddoc.validate_doc_update ?? "");
-    if (!knownGeneratedVersion || (!usesLocalSeq && !hasLegacyDeleteRule)) return;
+    const needsLegacyRewrite = legacyGeneratedVersion && (usesLocalSeq || hasLegacyDeleteRule);
+    if (!needsLegacyRewrite && !needsGlobalViewOption) return;
 
     const generated = buildAclDesignDoc();
-    const next = {
-      ...ddoc,
-      _id: ddoc._id ?? generated._id,
-      _rev: ddoc._rev,
-      language: generated.language,
-      options: { ...ddoc.options, ...generated.options },
-      type: generated.type,
-      version: generated.version,
-      stamp: generated.stamp,
-      views: { ...ddoc.views, acl: generated.views.acl },
-      validate_doc_update: generated.validate_doc_update,
-    };
+    const next = needsLegacyRewrite
+      ? {
+          ...ddoc,
+          _id: ddoc._id ?? generated._id,
+          _rev: ddoc._rev,
+          language: generated.language,
+          options: { ...ddoc.options, ...generated.options },
+          type: generated.type,
+          version: generated.version,
+          stamp: generated.stamp,
+          views: { ...ddoc.views, acl: generated.views.acl },
+          validate_doc_update: generated.validate_doc_update,
+        }
+      : {
+          ...ddoc,
+          options: { ...ddoc.options, partitioned: false },
+          stamp: generated.stamp,
+        };
     const put = await this.admin.fetch(`/${encodeURIComponent(db)}/_design/acl`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },

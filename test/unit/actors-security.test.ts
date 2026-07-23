@@ -99,6 +99,22 @@ describe("single-document authorization hardening", () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 
+  it("never forwards uninspectable multipart document writes for non-admins", async () => {
+    const state = stateWith([{ _id: "owned", creator: "alice", owners: ["u-bob"] }]);
+    const { app } = appWithState(state);
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const res = await app.request("http://localhost/docs/owned", {
+      method: "PUT",
+      headers: { "Content-Type": "multipart/related; boundary=docs" },
+      body: "--docs\r\nContent-Type: application/json\r\n\r\n{}\r\n--docs--",
+    });
+
+    expect(res.status).toBe(415);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
   it("requires write and delete permission for design update handlers", async () => {
     const state = stateWith([{ _id: "shared", creator: "alice", acl: ["u-bob"] }]);
     const { app } = appWithState(state);

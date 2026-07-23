@@ -222,11 +222,14 @@ export const actors: Record<string, Actor> = {
     let id = docIdFromParams(c);
     let bufferedBody: string | undefined;
     let deleting = false;
+    let bodyParseFailed = false;
+    const principal = c.get("principal");
 
     // Direct JSON document writes can carry a tombstone. Attachments are
     // arbitrary bytes and use the route method for delete authorization.
     const inspectBody =
-      c.req.method === "POST" || (c.req.method === "PUT" && c.req.param("attachment") == null);
+      !principal.admin &&
+      (c.req.method === "POST" || (c.req.method === "PUT" && c.req.param("attachment") == null));
     if (inspectBody) {
       try {
         bufferedBody = await readTextLimited(c.req.raw, c.get("config").server.maxBodyBytes);
@@ -248,13 +251,7 @@ export const actors: Record<string, Actor> = {
           deleting = parsed._deleted === true;
         }
       } catch {
-        // Invalid JSON — let Couch return its native error.
-        return forwardToCouch(c, c.get("config"), {
-          body: bufferedBody,
-          headers: {
-            "Content-Type": c.req.header("content-type") || "application/json",
-          },
-        });
+        bodyParseFailed = true;
       }
     }
 
@@ -263,10 +260,22 @@ export const actors: Record<string, Actor> = {
         return couchError("not_found", "Unsupported endpoint.", 404);
       }
       await ensureDocRow(c.get("aclCache"), state, id);
-      const flags = flagsForDoc(state, c.get("principal"), id);
+      const flags = flagsForDoc(state, principal, id);
       if (deleting ? !flags._d : !flags._w) {
         return couchError("forbidden", "ACL", 403);
       }
+    }
+
+    if (bodyParseFailed) {
+      const contentType = c.req.header("content-type")?.toLowerCase() ?? "";
+      if (contentType.startsWith("multipart/")) {
+        return couchError(
+          "not_implemented",
+          "Multipart document writes are unsupported for non-admins. Use JSON documents and attachment endpoints.",
+          415,
+        );
+      }
+      return couchError("bad_request", "Invalid JSON document.", 400);
     }
 
     if (bufferedBody !== undefined) {

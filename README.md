@@ -102,6 +102,7 @@ Unmapped endpoints return **404** for non-admins (default-deny). `_list`, `_show
 - After ACL filtering, `limit` may under-deliver rows — prefer `key` / `keys` queries when counts matter.
 - View `reduce` / `group` is **501** for non-admins (aggregates have no doc ids to ACL-filter), including when requested in a POST body. Use `reduce=false`, or call as admin. Non-admin view requests force `reduce=false` upstream.
 - Targeted `_update` handlers require read, write, and delete on the document because a handler may emit arbitrary updates or tombstones. Handlers without a target document are **501**.
+- Non-admin multipart document writes are **415** because tombstone metadata cannot be authorized safely without buffering the full MIME body. Use JSON document writes plus the attachment endpoints.
 - Deletion tombstones stay visible on `_changes` to principals who could read the doc (last ACL retained / recovered from the pre-delete revision). Users who never had read access do not see tombstones (no existence leak).
 - Keyed `_all_docs` / view queries may return `not_found` placeholders for denied ids (positional alignment). Non-keyed listings **drop** denied rows — never emit placeholders that would leak foreign ids.
 - Continuous `_changes` sequences are opaque strings (Couch 2+/3); never treat them as integers.

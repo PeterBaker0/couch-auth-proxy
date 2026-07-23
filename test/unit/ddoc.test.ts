@@ -65,4 +65,48 @@ describe("generated ACL design document", () => {
     expect((upgraded.views as Record<string, unknown>).custom).toEqual(legacy.views.custom);
     expect(String(upgraded.validate_doc_update)).not.toContain("You can't delete doc");
   });
+
+  it("adds the global-view option to early v2.1 ddocs without replacing custom code", async () => {
+    const cache = new AclCache(
+      loadConfig({
+        COUCH_URL: "http://127.0.0.1:5984",
+        RATE_LIMIT_ENABLED: "false",
+      }),
+    );
+    let written: Record<string, unknown> | undefined;
+    cache.adminClient.fetch = vi.fn(async (_path: string, init?: RequestInit) => {
+      written = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response("{}", { status: 201 });
+    }) as typeof cache.adminClient.fetch;
+    const map = "function (doc) { emit(doc._id, { custom: true }); }";
+    const validate = "function (nd, od) { if (!nd.kind) throw({forbidden:'kind'}); }";
+    const earlyV21 = {
+      _id: "_design/acl",
+      _rev: "2-early",
+      version: "2.1.0",
+      type: "ddoc",
+      acl: [],
+      options: { local_seq: true },
+      views: { acl: { map } },
+      validate_doc_update: validate,
+    };
+
+    await (
+      cache as unknown as {
+        maybeMigrateStamp: (db: string, response: Response) => Promise<void>;
+      }
+    ).maybeMigrateStamp(
+      "partitioned",
+      new Response(JSON.stringify(earlyV21), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    expect(written).toBeDefined();
+    const upgraded = written!;
+    expect(upgraded.options).toMatchObject({ local_seq: true, partitioned: false });
+    expect((upgraded.views as { acl: { map: string } }).acl.map).toBe(map);
+    expect(upgraded.validate_doc_update).toBe(validate);
+  });
 });
