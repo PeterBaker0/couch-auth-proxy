@@ -815,9 +815,10 @@ export class AclCache {
       owners?: string[];
       acl?: string[];
       parent?: string;
-    }>(`/${encodeURIComponent(db)}/${encodeURIComponent(id)}`, {
-      ...(rev ? { query: { rev } } : {}),
-    });
+    }>(
+      `/${encodeURIComponent(db)}/${encodeURIComponent(id)}`,
+      rev ? { query: { rev } } : undefined,
+    );
     if (!res.ok) {
       if (res.status === 404) return undefined;
       throw new Error(`Live revision unavailable: ${res.status}`);
