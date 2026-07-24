@@ -7,7 +7,16 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { ADMIN_PASS, ADMIN_USER, authHeaders, mintJwt, PROXY, waitForReady } from "./helpers.js";
+import {
+  ADMIN_PASS,
+  ADMIN_USER,
+  authHeaders,
+  ensureDbOpenForDemoUsers,
+  mintJwt,
+  PROXY,
+  waitForReady,
+  waitUntil,
+} from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -67,17 +76,22 @@ describe("env access policy integration", () => {
     // Create data-* DBs + a non-matching DB via the default (unrestricted) proxy as admin.
     const admin = authHeaders("basic", ADMIN_USER, ADMIN_PASS);
     for (const db of ["data-app", "data-other", "meta-internal"]) {
-      const put = await fetch(`${PROXY}/${db}`, { method: "PUT", headers: admin });
-      expect([201, 412]).toContain(put.status);
+      await ensureDbOpenForDemoUsers(db);
     }
 
-    // Seed a readable doc for alice in data-app.
-    const docRes = await fetch(`${PROXY}/data-app/note1`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", ...admin },
-      body: JSON.stringify({ _id: "note1", type: "note", acl: ["r-readers"] }),
-    });
-    expect([201, 409]).toContain(docRes.status);
+    // Seed a readable doc for alice in data-app (retry while ACL cache settles).
+    await waitUntil(
+      "seed data-app/note1",
+      async () => {
+        const docRes = await fetch(`${PROXY}/data-app/note1`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...admin },
+          body: JSON.stringify({ _id: "note1", type: "note", acl: ["r-readers"] }),
+        });
+        return [201, 409].includes(docRes.status);
+      },
+      30_000,
+    );
 
     const network = await resolveComposeNetwork();
     // Reuse image built by compose.
@@ -125,6 +139,18 @@ describe("env access policy integration", () => {
     ]);
     startedContainer = true;
     await waitForUrlReady(POLICY_PROXY);
+
+    // Warm ACL followers on the policy proxy (ready probe does not preload these DBs).
+    for (const db of ["data-app", "acldemo"]) {
+      await waitUntil(
+        `policy proxy acl ready ${db}`,
+        async () => {
+          const touch = await fetch(`${POLICY_PROXY}/${db}`, { headers: admin });
+          return touch.ok;
+        },
+        60_000,
+      );
+    }
   }, 180_000);
 
   afterAll(async () => {
