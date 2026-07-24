@@ -8,9 +8,15 @@
  * 4. Bucket `dbacl` overlay from `_design/acl`
  *
  * `aclRowFromDoc` mirrors the default map function for unit tests / source of truth.
+ *
+ * With `LOG_LEVEL=verbose`, every resolution emits a structured decision trail
+ * (reason, matched tokens, final flags) so permission bugs are diagnosable.
  */
 import type { Principal } from "../auth/types.js";
+import { createLogger, isLevelEnabled, matchingTokens } from "../util/log.js";
 import type { AclFlags, AclRow, DbAclOverlay } from "./types.js";
+
+const log = createLogger("acl-resolve");
 
 /**
  * Resolve r/w/d for a principal against a cached ACL row (+ optional parent + dbacl).
@@ -29,34 +35,103 @@ export function resolveDocAcl(params: {
   noacl?: boolean;
 }): AclFlags {
   const { principal, docId, row, parentRow, dbacl, noacl } = params;
+  const verbose = isLevelEnabled("verbose");
 
   if (principal.admin) {
-    return { _r: true, _w: true, _d: true };
+    const flags = { _r: true, _w: true, _d: true };
+    if (verbose) {
+      log.verbose("resolve", {
+        docId,
+        user: principal.name,
+        admin: true,
+        reason: "admin",
+        flags,
+      });
+    }
+    return flags;
   }
 
   // Default open; tightened below when a concrete ACL row is present.
   const acl: AclFlags = { _r: true, _w: true, _d: true };
+  let reason = "default-open";
+  const designDoc = docId.startsWith("_design/");
 
-  if (docId.startsWith("_design/")) {
+  if (designDoc) {
     acl._w = false;
     acl._d = false;
+    reason = "design-doc-default";
   }
+
+  let matchedRow: { _r: string[]; _w: string[]; _d: string[] } | undefined;
+  let matchedParent: { _r: string[]; _w: string[]; _d: string[] } | undefined;
+  let matchedDbacl: { _r: string[]; _w: string[]; _d: string[] } | undefined;
 
   if (!noacl) {
     if (row) {
       // Row present → deny-by-default, then union grants from doc + parent.
       acl._r = acl._w = acl._d = false;
+      reason = parentRow ? "row+parent" : "row";
       applyTokens(acl, row, principal.aclTokens);
-      if (parentRow) applyTokens(acl, parentRow, principal.aclTokens);
+      if (verbose) {
+        matchedRow = {
+          _r: matchingTokens(principal.aclTokens, row._r),
+          _w: matchingTokens(principal.aclTokens, row._w),
+          _d: matchingTokens(principal.aclTokens, row._d),
+        };
+      }
+      if (parentRow) {
+        applyTokens(acl, parentRow, principal.aclTokens);
+        if (verbose) {
+          matchedParent = {
+            _r: matchingTokens(principal.aclTokens, parentRow._r),
+            _w: matchingTokens(principal.aclTokens, parentRow._w),
+            _d: matchingTokens(principal.aclTokens, parentRow._d),
+          };
+        }
+      }
+    } else if (verbose) {
+      reason = designDoc ? "design-doc-default" : "no-row-default-open";
     }
+  } else {
+    reason = "noacl-passthrough";
   }
 
   if (dbacl) {
     // Empty docId is used for DB-level checks — start denied then apply overlay.
     if (!docId) {
       acl._r = acl._w = acl._d = false;
+      reason = "dbacl-db-level";
+    } else if (reason === "default-open" || reason === "no-row-default-open") {
+      reason = "dbacl-overlay";
+    } else if (!reason.includes("dbacl")) {
+      reason = `${reason}+dbacl`;
     }
     applyDbacl(acl, dbacl, principal.aclTokens);
+    if (verbose) {
+      matchedDbacl = {
+        _r: matchingTokens(principal.aclTokens, dbacl._r ?? []),
+        _w: matchingTokens(principal.aclTokens, dbacl._w ?? []),
+        _d: matchingTokens(principal.aclTokens, dbacl._d ?? []),
+      };
+    }
+  }
+
+  if (verbose) {
+    log.verbose("resolve", {
+      docId,
+      user: principal.name,
+      admin: false,
+      noacl: !!noacl,
+      reason,
+      rowPresent: !!row,
+      parentId: row?.p || undefined,
+      parentPresent: !!parentRow,
+      dbaclPresent: !!dbacl,
+      matchedRow,
+      matchedParent,
+      matchedDbacl,
+      flags: { ...acl },
+    });
   }
 
   return acl;

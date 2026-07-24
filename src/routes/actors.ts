@@ -42,11 +42,23 @@ import {
   readResponseTextLimited,
   readTextLimited,
 } from "../util/limitStream.js";
+import { createLogger, isLevelEnabled } from "../util/log.js";
 
 type AppContext = Context<AppEnv>;
 const ACL_LOOKUP_CONCURRENCY = 16;
 const DESIGN_API_ATTACHMENT =
   /^_(?:view|list|show|update|search|search_info|nouveau|nouveau_info|rewrite|info)(?:\/|$)/;
+const log = createLogger("actors");
+
+/** Verbose/debug helper for actor allow/deny decisions. */
+function logDecision(
+  actor: string,
+  fields: Record<string, unknown>,
+  level: "verbose" | "debug" | "info" | "warn" = "verbose",
+): void {
+  if (!isLevelEnabled(level)) return;
+  log[level](actor, fields);
+}
 
 /** One restmap middleware step. */
 export type Actor = (c: AppContext, next: Next) => Promise<Response | void>;
@@ -140,6 +152,11 @@ function urlAfterDb(c: AppContext, db: string): string {
 export const actors: Record<string, Actor> = {
   /** Transparent proxy — no ACL beyond what earlier actors already enforced. */
   async pipe(c) {
+    logDecision("pipe", {
+      method: c.req.method,
+      path: c.req.path,
+      user: c.get("principal")?.name ?? null,
+    });
     return forwardToCouch(c, c.get("config"));
   },
 
@@ -147,15 +164,34 @@ export const actors: Record<string, Actor> = {
   async session(c) {
     if (c.req.method === "DELETE") {
       c.get("sessions").invalidate(c.req.raw.headers);
+      logDecision("session", { action: "invalidate-cache", method: "DELETE" }, "debug");
     }
     return forwardToCouch(c, c.get("config"));
   },
 
   /** Server-admin only; everyone else gets 403. */
   async admin(c) {
-    if (!c.get("principal").admin) {
+    const principal = c.get("principal");
+    if (!principal.admin) {
+      logDecision(
+        "admin",
+        {
+          decision: "deny",
+          reason: "not-admin",
+          user: principal.name,
+          method: c.req.method,
+          path: c.req.path,
+        },
+        "debug",
+      );
       return couchError("forbidden", "Access denied.", 403);
     }
+    logDecision("admin", {
+      decision: "allow",
+      user: principal.name,
+      method: c.req.method,
+      path: c.req.path,
+    });
     return forwardToCouch(c, c.get("config"));
   },
 
@@ -191,6 +227,11 @@ export const actors: Record<string, Actor> = {
       return;
     }
     if (!isDatabaseName(db)) {
+      logDecision(
+        "db",
+        { decision: "deny", reason: "invalid-db-name", db, user: c.get("principal").name },
+        "debug",
+      );
       return couchError("forbidden", "Access denied.", 403);
     }
 
@@ -200,12 +241,15 @@ export const actors: Record<string, Actor> = {
     } catch (err) {
       if (err instanceof DbMissingError) {
         // Let Couch return its native missing-db error.
+        logDecision("db", { decision: "pipe", reason: "db-missing", db }, "debug");
         return forwardToCouch(c, c.get("config"));
       }
       if (err instanceof AclUnavailableError) {
+        log.warn("db ACL unavailable", { db, err: String(err) });
         return couchError("service_unavailable", "ACL cache unavailable", 503);
       }
       // Fail closed on unexpected errors — never open the DB.
+      log.error("db ACL unexpected error", { db, err: String(err) });
       return couchError("service_unavailable", "ACL cache unavailable", 503);
     }
 
@@ -213,18 +257,61 @@ export const actors: Record<string, Actor> = {
     const level = dbAccessLevel(principal, state.compiledRestrict, state.noacl);
     if (level === 0) {
       // Hide restricted DBs as not_found (same as missing).
+      logDecision(
+        "db",
+        {
+          decision: "deny",
+          reason: "restrict-star",
+          db,
+          user: principal.name,
+          accessLevel: level,
+          noacl: state.noacl,
+        },
+        "debug",
+      );
       return couchError("not_found", "Database does not exist.", 404);
     }
 
     const after = urlAfterDb(c, db);
     if (!methodAllowed(principal, state.compiledRestrict, c.req.method, after)) {
+      logDecision(
+        "db",
+        {
+          decision: "deny",
+          reason: "method-restricted",
+          db,
+          user: principal.name,
+          method: c.req.method,
+          urlAfterDb: after,
+          accessLevel: level,
+        },
+        "debug",
+      );
       return couchError("forbidden", "Method restricted.", 403);
     }
 
     if (state.noacl) {
+      logDecision("db", {
+        decision: "pipe",
+        reason: "noacl",
+        db,
+        user: principal.name,
+        accessLevel: level,
+      });
       return forwardToCouch(c, c.get("config"));
     }
 
+    logDecision("db", {
+      decision: "allow",
+      db,
+      user: principal.name,
+      accessLevel: level,
+      method: c.req.method,
+      urlAfterDb: after,
+      aclRows: state.acl.size,
+      ready: state.ready,
+      followerUp: state.followerUp,
+    });
     c.set("dbAclState", state);
     await next();
   },
@@ -238,10 +325,24 @@ export const actors: Record<string, Actor> = {
       return;
     }
     if (!validDocumentId(c, id)) {
+      logDecision("doc", { decision: "deny", reason: "invalid-doc-id", docId: id, db: state.name });
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
-    if (!canRead(state, c.get("principal"), id)) {
+    const principal = c.get("principal");
+    const allowed = canRead(state, principal, id);
+    logDecision(
+      "doc",
+      {
+        decision: allowed ? "allow" : "deny",
+        action: "read",
+        db: state.name,
+        docId: id,
+        user: principal.name,
+      },
+      allowed ? "verbose" : "debug",
+    );
+    if (!allowed) {
       return couchError("not_found", "missing", 404);
     }
     await next();
@@ -296,11 +397,30 @@ export const actors: Record<string, Actor> = {
 
     if (id) {
       if (!validDocumentId(c, id)) {
+        logDecision("docWrite", {
+          decision: "deny",
+          reason: "invalid-doc-id",
+          docId: id,
+          db: state.name,
+        });
         return couchError("not_found", "Unsupported endpoint.", 404);
       }
       await ensureDocRow(c.get("aclCache"), state, id);
       const flags = flagsForDoc(state, principal, id);
-      if (deleting ? !flags._d : !flags._w) {
+      const allowed = deleting ? flags._d : flags._w;
+      logDecision(
+        "docWrite",
+        {
+          decision: allowed ? "allow" : "deny",
+          action: deleting ? "delete-via-put" : "write",
+          db: state.name,
+          docId: id,
+          user: principal.name,
+          flags,
+        },
+        allowed ? "verbose" : "debug",
+      );
+      if (!allowed) {
         return couchError("forbidden", "ACL", 403);
       }
     }
@@ -308,6 +428,7 @@ export const actors: Record<string, Actor> = {
     if (bodyParseFailed) {
       const contentType = c.req.header("content-type")?.toLowerCase() ?? "";
       if (contentType.startsWith("multipart/")) {
+        log.warn("docWrite multipart rejected", { db: state.name, user: principal.name });
         return couchError(
           "not_implemented",
           "Multipart document writes are unsupported for non-admins. Use JSON documents and attachment endpoints.",
@@ -337,10 +458,29 @@ export const actors: Record<string, Actor> = {
       return;
     }
     if (!validDocumentId(c, id)) {
+      logDecision("docDelete", {
+        decision: "deny",
+        reason: "invalid-doc-id",
+        docId: id,
+        db: state.name,
+      });
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
-    if (!canDelete(state, c.get("principal"), id)) {
+    const principal = c.get("principal");
+    const allowed = canDelete(state, principal, id);
+    logDecision(
+      "docDelete",
+      {
+        decision: allowed ? "allow" : "deny",
+        action: "delete",
+        db: state.name,
+        docId: id,
+        user: principal.name,
+      },
+      allowed ? "verbose" : "debug",
+    );
+    if (!allowed) {
       return couchError("forbidden", "ACL", 403);
     }
     await next();
@@ -361,11 +501,45 @@ export const actors: Record<string, Actor> = {
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
     await ensureDocRow(c.get("aclCache"), state, id);
-    const flags = flagsForDoc(state, c.get("principal"), id);
+    const principal = c.get("principal");
+    const flags = flagsForDoc(state, principal, id);
     if (!flags._r) {
+      logDecision(
+        "docUpdate",
+        {
+          decision: "deny",
+          reason: "no-read",
+          db: state.name,
+          docId: id,
+          user: principal.name,
+          flags,
+        },
+        "debug",
+      );
       return couchError("not_found", "missing", 404);
     }
-    if (!flags._w || !flags._d) return couchError("forbidden", "ACL", 403);
+    if (!flags._w || !flags._d) {
+      logDecision(
+        "docUpdate",
+        {
+          decision: "deny",
+          reason: "need-write-and-delete",
+          db: state.name,
+          docId: id,
+          user: principal.name,
+          flags,
+        },
+        "debug",
+      );
+      return couchError("forbidden", "ACL", 403);
+    }
+    logDecision("docUpdate", {
+      decision: "allow",
+      db: state.name,
+      docId: id,
+      user: principal.name,
+      flags,
+    });
     await next();
   },
 
@@ -379,8 +553,20 @@ export const actors: Record<string, Actor> = {
     if (!validDocumentId(c, id)) {
       return couchError("not_found", "Unsupported endpoint.", 404);
     }
+    const principal = c.get("principal");
     await ensureDocRow(c.get("aclCache"), state, id);
-    if (!canRead(state, c.get("principal"), id)) {
+    if (!canRead(state, principal, id)) {
+      logDecision(
+        "copy",
+        {
+          decision: "deny",
+          reason: "source-unreadable",
+          db: state.name,
+          docId: id,
+          user: principal.name,
+        },
+        "debug",
+      );
       return couchError("not_found", "missing", 404);
     }
     const destHeader = c.req.header("Destination") || c.req.header("destination");
@@ -392,12 +578,47 @@ export const actors: Record<string, Actor> = {
     const queryIndex = destHeader.indexOf("?");
     const destinationPath =
       `/${encodeURIComponent(destId)}` + (queryIndex >= 0 ? destHeader.slice(queryIndex) : "");
-    if (!methodAllowed(c.get("principal"), state.compiledRestrict, "PUT", destinationPath)) {
+    if (!methodAllowed(principal, state.compiledRestrict, "PUT", destinationPath)) {
+      logDecision(
+        "copy",
+        {
+          decision: "deny",
+          reason: "dest-method-restricted",
+          db: state.name,
+          docId: id,
+          destId,
+          user: principal.name,
+        },
+        "debug",
+      );
       return couchError("forbidden", "Method restricted.", 403);
     }
     await ensureDocRow(c.get("aclCache"), state, destId);
-    const destFlags = flagsForDoc(state, c.get("principal"), destId);
-    if (!destFlags._w) return couchError("forbidden", "ACL", 403);
+    const destFlags = flagsForDoc(state, principal, destId);
+    if (!destFlags._w) {
+      logDecision(
+        "copy",
+        {
+          decision: "deny",
+          reason: "dest-not-writable",
+          db: state.name,
+          docId: id,
+          destId,
+          user: principal.name,
+          destFlags,
+        },
+        "debug",
+      );
+      return couchError("forbidden", "ACL", 403);
+    }
+    logDecision("copy", {
+      decision: "allow",
+      db: state.name,
+      docId: id,
+      destId,
+      user: principal.name,
+      destFlags,
+    });
     return forwardToCouch(c, c.get("config"));
   },
 
@@ -461,6 +682,17 @@ export const actors: Record<string, Actor> = {
 
     // Reduce/group aggregates have no doc ids — reject (never pass through).
     if (wantsReduce && !principal.admin) {
+      logDecision(
+        "rows",
+        {
+          decision: "deny",
+          reason: "reduce-group-unsupported",
+          db: state.name,
+          user: principal.name,
+          path: c.req.path,
+        },
+        "debug",
+      );
       return couchError(
         "not_implemented",
         "couch-auth-proxy does not support reduce/group over ACL-filtered views. Use reduce=false, or call as admin.",
@@ -517,6 +749,15 @@ export const actors: Record<string, Actor> = {
     const filtered = filterRows(state, principal, body, {
       preserveDenied: hasKeys,
     });
+    logDecision("rows", {
+      decision: "filter",
+      db: state.name,
+      user: principal.name,
+      path: c.req.path,
+      upstreamRows: body.rows?.length ?? 0,
+      filteredRows: filtered.rows.length,
+      preserveDenied: hasKeys,
+    });
     return toClientResponse(upstream, { body: JSON.stringify(filtered) });
   },
 
@@ -536,10 +777,17 @@ export const actors: Record<string, Actor> = {
     ) {
       return couchError("bad_request", "Unsupported _changes feed.", 400);
     }
+    const principal = c.get("principal");
+    logDecision("changes", {
+      decision: "stream-filter",
+      db: state.name,
+      user: principal.name,
+      feed,
+    });
     const upstream = await fetchFromCouch(c, config);
     if (!upstream.ok || !upstream.body) return toClientResponse(upstream);
 
-    const filtered = filterChangesStream(upstream.body, state, c.get("principal"), feed, {
+    const filtered = filterChangesStream(upstream.body, state, principal, feed, {
       maxBufferBytes: config.server.maxBodyBytes,
     });
     const response = toClientResponse(upstream, { body: filtered });
@@ -579,10 +827,22 @@ export const actors: Record<string, Actor> = {
         .map((doc) => doc._id!),
     );
 
-    const filtered = filterBulkDocs(state, c.get("principal"), body, (id) =>
-      validDocumentId(c, id),
-    );
+    const principal = c.get("principal");
+    const filtered = filterBulkDocs(state, principal, body, (id) => validDocumentId(c, id));
     const atomic = String(body.all_or_nothing) === "true";
+    logDecision(
+      "bulk",
+      {
+        decision: atomic && filtered.hadDenied ? "deny" : "filter",
+        db: state.name,
+        user: principal.name,
+        requested: body.docs.length,
+        allowed: filtered.allowed.length,
+        hadDenied: filtered.hadDenied,
+        allOrNothing: atomic,
+      },
+      filtered.hadDenied ? "debug" : "verbose",
+    );
     if (atomic && filtered.hadDenied) {
       return couchError("forbidden", "ACL rejected transaction.", 403);
     }
@@ -664,8 +924,17 @@ export const actors: Record<string, Actor> = {
       }
       throw err;
     }
+    const principal = c.get("principal");
+    const filtered = filterBulkGet(state, principal, body);
+    logDecision("bulkGet", {
+      decision: "filter",
+      db: state.name,
+      user: principal.name,
+      requested: body.results?.length ?? 0,
+      results: filtered.results?.length ?? 0,
+    });
     return toClientResponse(upstream, {
-      body: JSON.stringify(filterBulkGet(state, c.get("principal"), body)),
+      body: JSON.stringify(filtered),
     });
   },
 
@@ -691,9 +960,16 @@ export const actors: Record<string, Actor> = {
       state,
       Object.keys(body).filter((id) => validDocumentId(c, id)),
     );
-    const filtered = filterRevsObject(state, c.get("principal"), body, (id) =>
-      validDocumentId(c, id),
-    );
+    const principal = c.get("principal");
+    const filtered = filterRevsObject(state, principal, body, (id) => validDocumentId(c, id));
+    logDecision("revs", {
+      decision: "filter",
+      db: state.name,
+      user: principal.name,
+      path: c.req.path,
+      requestedKeys: Object.keys(body).length,
+      allowedKeys: Object.keys(filtered).length,
+    });
     const upstream = await fetchFromCouch(c, c.get("config"), {
       body: JSON.stringify(filtered),
       headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -736,8 +1012,21 @@ export const actors: Record<string, Actor> = {
         if (dbAccessLevel(principal, policy.compiledRestrict, policy.noacl) > 0) {
           visible.push(db);
         }
-      } catch {}
+      } catch (err) {
+        logDecision(
+          "dblist",
+          { decision: "hide", reason: "inspect-failed", db, err: String(err) },
+          "debug",
+        );
+      }
     }
+    logDecision("dblist", {
+      decision: "filter",
+      user: principal.name,
+      upstreamDbs: dbs.length,
+      visibleDbs: visible.length,
+      visible,
+    });
     return toClientResponse(upstream, { body: JSON.stringify(visible) });
   },
 
@@ -797,7 +1086,16 @@ export const actors: Record<string, Actor> = {
       }
       throw err;
     }
-    const filtered = filterFindDocs(state, c.get("principal"), body);
+    const principal = c.get("principal");
+    const filtered = filterFindDocs(state, principal, body);
+    logDecision("find", {
+      decision: "filter",
+      db: state.name,
+      user: principal.name,
+      upstreamDocs: body.docs?.length ?? 0,
+      filteredDocs: filtered.docs.length,
+      injectedId,
+    });
     if (injectedId) {
       filtered.docs = filtered.docs.map(({ _id: _injectedId, ...doc }) => doc);
     }
@@ -806,7 +1104,19 @@ export const actors: Record<string, Actor> = {
 
   /** Mango index management — admin only. */
   async indexAdmin(c) {
-    if (!c.get("principal").admin) {
+    const principal = c.get("principal");
+    if (!principal.admin) {
+      logDecision(
+        "indexAdmin",
+        {
+          decision: "deny",
+          reason: "not-admin",
+          user: principal.name,
+          method: c.req.method,
+          path: c.req.path,
+        },
+        "debug",
+      );
       return couchError("forbidden", "Index management requires admin.", 403);
     }
     return forwardToCouch(c, c.get("config"));

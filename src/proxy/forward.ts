@@ -9,6 +9,9 @@
 import type { Context } from "hono";
 import type { AppConfig } from "../config.js";
 import { BodyTooLargeError, limitBytes } from "../util/limitStream.js";
+import { createLogger, isLevelEnabled } from "../util/log.js";
+
+const log = createLogger("proxy");
 
 /** Headers that must not be forwarded (hop-by-hop / framing). */
 const HOP_BY_HOP = new Set([
@@ -134,7 +137,23 @@ export async function fetchFromCouch(
   };
   if (body) init.duplex = "half";
 
+  if (isLevelEnabled("verbose")) {
+    log.verbose("fetchFromCouch", {
+      method,
+      path: url.pathname,
+      query: url.search || undefined,
+      bodyOverride: bodyOverridden,
+    });
+  }
+
   const response = await fetch(url, init);
+  if (isLevelEnabled("debug")) {
+    log.debug("upstream response", {
+      method,
+      path: url.pathname,
+      status: response.status,
+    });
+  }
   const location = response.headers.get("location");
   if (!location) return response;
 

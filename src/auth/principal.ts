@@ -6,7 +6,10 @@
  * - Each role is added both raw and as `r-<role>` when not already prefixed
  * - Anonymous principals get neither `r-*` nor username tokens
  */
+import { createLogger, isLevelEnabled } from "../util/log.js";
 import type { Principal, SessionInfo, UserCtx } from "./types.js";
+
+const log = createLogger("principal");
 
 /** Expand `userCtx` into ACL tokens and admin flag. */
 export function buildPrincipal(session: SessionInfo): Principal {
@@ -29,7 +32,7 @@ export function buildPrincipal(session: SessionInfo): Principal {
 
   const authenticatedBy = (session.info?.authenticated as Principal["authenticatedBy"]) ?? null;
 
-  return {
+  const principal: Principal = {
     name,
     roles,
     admin,
@@ -37,6 +40,18 @@ export function buildPrincipal(session: SessionInfo): Principal {
     authenticatedBy,
     raw: session,
   };
+
+  if (isLevelEnabled("verbose")) {
+    log.verbose("buildPrincipal", {
+      user: principal.name,
+      admin: principal.admin,
+      roles: principal.roles,
+      aclTokens: principal.aclTokens,
+      authenticatedBy: principal.authenticatedBy,
+    });
+  }
+
+  return principal;
 }
 
 /** Unauthenticated principal (no name, no roles, no `r-*`). */

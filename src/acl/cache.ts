@@ -21,7 +21,7 @@ import { AdminClient } from "../couch/adminClient.js";
 import { ChangesFollower, fetchAclRow, fetchUpdateSeq } from "./changesFollower.js";
 import { isSystemDatabase } from "./names.js";
 import { compileRestrict, type CompiledRestrict } from "./restrict.js";
-import { createLogger } from "../util/log.js";
+import { createLogger, isLevelEnabled } from "../util/log.js";
 
 type EnsureDdocResult =
   /** Database does not exist upstream */
@@ -115,6 +115,13 @@ export class AclCache {
   async inspectAccessPolicy(db: string): Promise<DbAccessPolicy> {
     const existing = this.dbs.get(db);
     if (existing?.ready && !existing.error) {
+      if (isLevelEnabled("verbose")) {
+        log.verbose("inspectAccessPolicy cache-hit", {
+          db,
+          noacl: existing.noacl,
+          hasRestrictStar: !!existing.compiledRestrict?.star,
+        });
+      }
       return {
         noacl: existing.noacl,
         compiledRestrict: existing.compiledRestrict,
@@ -126,11 +133,24 @@ export class AclCache {
       views?: { acl?: { map?: string } };
     }>(`/${encodeURIComponent(db)}/_design/acl`);
     if (!ddoc.ok) {
-      if (ddoc.status === 404) return { noacl: true };
+      if (ddoc.status === 404) {
+        if (isLevelEnabled("verbose")) {
+          log.verbose("inspectAccessPolicy", { db, noacl: true, reason: "ddoc-404" });
+        }
+        return { noacl: true };
+      }
       throw new Error(`Failed to inspect _design/acl in ${db}: ${ddoc.status}`);
     }
+    const noacl = !ddoc.body.views?.acl?.map;
+    if (isLevelEnabled("verbose")) {
+      log.verbose("inspectAccessPolicy", {
+        db,
+        noacl,
+        reason: noacl ? "no-acl-map" : "acl-map-present",
+      });
+    }
     return {
-      noacl: !ddoc.body.views?.acl?.map,
+      noacl,
       compiledRestrict: compileRestrict(ddoc.body.restrict),
     };
   }
@@ -141,6 +161,7 @@ export class AclCache {
    */
   async ensureDb(db: string): Promise<DbAclState> {
     if (this.stopped) {
+      log.warn("ensureDb while stopped", { db });
       return {
         name: db,
         acl: new Map(),
@@ -152,11 +173,25 @@ export class AclCache {
     }
 
     const existing = this.dbs.get(db);
-    if (existing?.ready && !existing.error) return existing;
+    if (existing?.ready && !existing.error) {
+      if (isLevelEnabled("verbose")) {
+        log.verbose("ensureDb ready", {
+          db,
+          noacl: existing.noacl,
+          rows: existing.acl.size,
+          followerUp: existing.followerUp,
+        });
+      }
+      return existing;
+    }
 
     const pending = this.inflight.get(db);
-    if (pending) return pending;
+    if (pending) {
+      if (isLevelEnabled("verbose")) log.verbose("ensureDb join-inflight", { db });
+      return pending;
+    }
 
+    log.debug("ensureDb load", { db });
     const work = this.loadDb(db);
     this.inflight.set(db, work);
     try {
@@ -182,6 +217,7 @@ export class AclCache {
   /** Stop all followers (process shutdown). Further ensures fail closed. */
   stop(): void {
     this.stopped = true;
+    log.info("stopping ACL cache", { dbs: this.dbs.size });
     for (const state of this.dbs.values()) {
       state.follower?.stop();
       state.followerUp = false;
@@ -213,7 +249,13 @@ export class AclCache {
     if (result.row) {
       state.acl.set(docId, result.row);
       state.tombstones?.delete(docId);
+      if (isLevelEnabled("verbose")) {
+        log.verbose("refreshDoc", { db, docId, reason: "view-row", parent: result.row.p || "" });
+      }
       return;
+    }
+    if (isLevelEnabled("verbose")) {
+      log.verbose("refreshDoc", { db, docId, reason: "reconcile-missing" });
     }
     await this.reconcileMissingAclRow(db, state, docId);
   }
@@ -225,17 +267,21 @@ export class AclCache {
   async requireReady(db: string): Promise<DbAclState> {
     const existing = this.dbs.get(db);
     if (existing?.reloading) {
+      log.warn("requireReady during reload", { db });
       throw new AclUnavailableError("ACL policy reload in progress");
     }
     const state = await this.ensureDb(db);
     if (state.missing) {
+      if (isLevelEnabled("verbose")) log.verbose("requireReady missing", { db });
       throw new DbMissingError(db);
     }
     if (!state.ready || state.error) {
+      log.warn("requireReady not ready", { db, error: state.error, ready: state.ready });
       throw new AclUnavailableError(state.error ?? "ACL cache not ready");
     }
     // Fail closed while the changes follower is down — cache may be stale.
     if (!state.noacl && !state.followerUp) {
+      log.warn("requireReady follower down", { db });
       throw new AclUnavailableError("ACL changes follower unavailable");
     }
     return state;
@@ -262,6 +308,7 @@ export class AclCache {
         state.error = `db missing: ${db}`;
         state.noacl = false;
         state.followerUp = false;
+        log.info("loadDb missing", { db });
         return state;
       }
       if (ddoc.kind === "absent") {
@@ -281,6 +328,7 @@ export class AclCache {
         state.followerUp = true;
         state.follower?.stop();
         state.follower = undefined;
+        log.info("loadDb noacl passthrough", { db });
         return state;
       }
 
@@ -290,6 +338,15 @@ export class AclCache {
       state.ready = true;
       state.missing = false;
       state.error = undefined;
+      log.info("loadDb ready", {
+        db,
+        rows: state.acl.size,
+        tombstones: state.tombstones?.size ?? 0,
+        noacl: state.noacl,
+        hasDbacl: !!state.dbacl,
+        hasRestrict: !!state.restrict,
+        since,
+      });
       this.startFollower(db, state, since);
       return state;
     } catch (err) {
@@ -335,6 +392,7 @@ export class AclCache {
         const text = await put.text();
         throw new Error(`Failed to install _design/acl in ${db}: ${put.status} ${text}`);
       }
+      log.info("installed _design/acl", { db });
       return { kind: "present" };
     }
     if (get.status === 401 || get.status === 403) {
@@ -530,6 +588,16 @@ export class AclCache {
     state.restrict = nextRestrict;
     state.compiledRestrict = nextCompiledRestrict;
     state.noacl = false;
+    log.debug("loadAll complete", {
+      db,
+      rows: loaded.size,
+      tombstones: tombstones.size,
+      mapChanged,
+      scannedTombstones: shouldScanTombstones,
+      generatedAclMap: state.generatedAclMap,
+      hasDbacl: !!nextDbacl,
+      hasRestrictStar: !!nextCompiledRestrict.star,
+    });
   }
 
   /** Attach (or replace) the continuous changes follower for an ACL-backed DB. */
@@ -548,6 +616,7 @@ export class AclCache {
         },
         onError: () => {
           state.followerUp = false;
+          log.warn("follower marked down", { db });
           // A per-row refresh failure marks the whole state unavailable. Repair
           // it with a fresh snapshot instead of waiting for unrelated traffic.
           if (!state.ready || state.error) {
@@ -556,6 +625,7 @@ export class AclCache {
         },
         onUp: () => {
           state.followerUp = true;
+          log.debug("follower up", { db, since: follower.lastSeq });
         },
       },
       since,
@@ -563,6 +633,7 @@ export class AclCache {
     state.follower = follower;
     // Fail closed until the feed actually opens (onUp).
     state.followerUp = false;
+    log.debug("starting follower", { db, since });
     follower.start();
   }
 
@@ -585,6 +656,7 @@ export class AclCache {
     if (id === "_design/acl") {
       // Do not authorize against a mixed snapshot while a potentially large
       // policy/view reload is in progress.
+      log.info("reloading ACL policy from ddoc change", { db, deleted: !!deleted });
       state.reloading = true;
       state.ready = false;
       try {
@@ -592,6 +664,11 @@ export class AclCache {
         state.error = undefined;
         state.ready = true;
         state.reloading = false;
+        log.info("ACL policy reload complete", {
+          db,
+          rows: state.acl.size,
+          noacl: state.noacl,
+        });
       } catch (err) {
         state.noacl = false;
         state.reloading = false;
@@ -608,6 +685,16 @@ export class AclCache {
           ? await this.recoverAclFromDeletedDoc(db, id, rev)
           : undefined;
         state.acl.set(id, recovered ?? this.deniedTombstoneRow(rev));
+        if (isLevelEnabled("verbose")) {
+          log.verbose("applyChange delete", {
+            db,
+            id,
+            reason: recovered ? "recovered-pre-delete" : "denied-tombstone",
+            rev,
+          });
+        }
+      } else if (isLevelEnabled("verbose")) {
+        log.verbose("applyChange delete", { db, id, reason: "retain-cached-row", rev });
       }
       (state.tombstones ??= new Set()).add(id);
       // Retain last ACL grants for tombstone visibility on user _changes feeds.
@@ -637,7 +724,13 @@ export class AclCache {
     if (result.row) {
       state.acl.set(id, result.row);
       state.tombstones?.delete(id);
+      if (isLevelEnabled("verbose")) {
+        log.verbose("applyChange upsert", { db, id, parent: result.row.p || "", rev });
+      }
     } else {
+      if (isLevelEnabled("verbose")) {
+        log.verbose("applyChange upsert", { db, id, reason: "reconcile-missing", rev });
+      }
       await this.reconcileMissingAclRow(db, state, id);
     }
   }
@@ -839,6 +932,7 @@ export class AclCache {
     state.ready = false;
     state.error = message;
     state.followerUp = false;
+    log.warn("ACL state marked unavailable", { db: state.name, error: message });
   }
 
   /**

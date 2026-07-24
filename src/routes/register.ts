@@ -14,6 +14,9 @@ import type { AppEnv } from "../middleware/context.js";
 import { ROUTES, type ActorName, type HttpMethod } from "./restmap.js";
 import { actors, type Actor } from "./actors.js";
 import { couchError, forwardToCouch } from "../proxy/forward.js";
+import { createLogger } from "../util/log.js";
+
+const log = createLogger("routes");
 
 /**
  * Register all restmap routes plus the default-deny catch-all.
@@ -27,13 +30,25 @@ export function registerRoutes(app: Hono<AppEnv>): void {
 
   // Default-deny: unmapped paths never silently pipe for non-admins.
   app.all("*", async (c) => {
-    if (c.get("principal").admin) {
+    const principal = c.get("principal");
+    if (principal.admin) {
+      log.debug("default-deny admin pipe", { method: c.req.method, path: c.req.path });
       return forwardToCouch(c, c.get("config"));
     }
     const path = c.req.path;
     if (path.startsWith("/_") && !path.startsWith("/_couch-auth-proxy")) {
+      log.debug("default-deny forbidden", {
+        method: c.req.method,
+        path,
+        user: principal.name,
+      });
       return couchError("forbidden", "Access denied.", 403);
     }
+    log.debug("default-deny not_found", {
+      method: c.req.method,
+      path,
+      user: principal.name,
+    });
     return couchError("not_found", "Unsupported endpoint.", 404);
   });
 }

@@ -9,6 +9,9 @@
 import { createMiddleware } from "hono/factory";
 import type { AppEnv } from "./context.js";
 import { resolveClientIp } from "../util/clientIp.js";
+import { createLogger } from "../util/log.js";
+
+const log = createLogger("rate-limit");
 
 type Bucket = { count: number; resetAt: number };
 
@@ -34,6 +37,11 @@ export function rateLimit() {
     }
     globalBucket.count += 1;
     if (globalBucket.count > cfg.maxRequests) {
+      log.warn("global rate limit exceeded", {
+        count: globalBucket.count,
+        maxRequests: cfg.maxRequests,
+        path: c.req.path,
+      });
       return c.json({ error: "service_unavailable", reason: "rate limit" }, 503);
     }
 
@@ -48,6 +56,12 @@ export function rateLimit() {
     c.header("X-RateLimit-Limit", String(cfg.perIpMaxRequests));
     c.header("X-RateLimit-Remaining", String(remaining));
     if (bucket.count > cfg.perIpMaxRequests) {
+      log.warn("per-IP rate limit exceeded", {
+        ip,
+        count: bucket.count,
+        maxRequests: cfg.perIpMaxRequests,
+        path: c.req.path,
+      });
       return c.json({ error: "too_many_requests", reason: "rate limit" }, 429);
     }
 

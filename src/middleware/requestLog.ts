@@ -7,7 +7,7 @@
  */
 import { createMiddleware } from "hono/factory";
 import type { AppEnv } from "./context.js";
-import { createLogger, requestId } from "../util/log.js";
+import { createLogger, isLevelEnabled, requestId } from "../util/log.js";
 
 const log = createLogger("http");
 
@@ -17,9 +17,17 @@ export function requestLog() {
     const id = c.req.header("x-request-id") || requestId();
     c.header("X-Request-Id", id);
     const start = Date.now();
+    if (isLevelEnabled("verbose")) {
+      log.verbose("request start", {
+        requestId: id,
+        method: c.req.method,
+        path: c.req.path,
+        query: c.req.url.includes("?") ? c.req.url.slice(c.req.url.indexOf("?")) : undefined,
+      });
+    }
     await next();
     const principal = c.get("principal");
-    log.info("request", {
+    const fields: Record<string, unknown> = {
       requestId: id,
       method: c.req.method,
       path: c.req.path,
@@ -27,6 +35,15 @@ export function requestLog() {
       durationMs: Date.now() - start,
       user: principal?.name ?? null,
       auth: principal?.authenticatedBy ?? null,
-    });
+    };
+    if (isLevelEnabled("verbose") && principal) {
+      fields.admin = principal.admin;
+      fields.roles = principal.roles;
+      fields.aclTokens = principal.aclTokens;
+    }
+    const status = c.res.status;
+    if (status >= 500) log.error("request", fields);
+    else if (status >= 400) log.warn("request", fields);
+    else log.info("request", fields);
   });
 }

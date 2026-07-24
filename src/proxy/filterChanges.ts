@@ -9,6 +9,9 @@ import type { Principal } from "../auth/types.js";
 import type { DbAclState } from "../acl/cache.js";
 import { canRead } from "../acl/lookup.js";
 import { BodyTooLargeError, limitBytes } from "../util/limitStream.js";
+import { createLogger, isLevelEnabled } from "../util/log.js";
+
+const log = createLogger("filter-changes");
 
 /** Pause upstream reads when the incomplete line buffer exceeds this size. */
 const HIGH_WATER_BYTES = 256 * 1024;
@@ -39,6 +42,13 @@ export function filterChangesStream(
   options?: FilterChangesOptions,
 ): ReadableStream<Uint8Array> {
   const mode = normalizeFeed(feed);
+  if (isLevelEnabled("verbose")) {
+    log.verbose("filterChangesStream", {
+      db: state.name,
+      user: principal.name,
+      feed: mode,
+    });
+  }
   if (mode === "continuous" || mode === "eventsource") {
     return filterLineFeed(upstream, state, principal, mode === "eventsource");
   }
@@ -190,11 +200,21 @@ function filterJsonChanges(
           controller.error(new Error("invalid _changes JSON"));
           return;
         }
-        const results = (body.results ?? []).filter((row) => {
+        const upstreamResults = body.results ?? [];
+        const results = upstreamResults.filter((row) => {
           // Fail closed: only forward changes with a readable document id.
           if (!row.id || typeof row.id !== "string") return false;
           return canRead(state, principal, row.id);
         });
+        if (isLevelEnabled("verbose")) {
+          log.verbose("filterJsonChanges", {
+            db: state.name,
+            user: principal.name,
+            upstream: upstreamResults.length,
+            kept: results.length,
+            dropped: upstreamResults.length - results.length,
+          });
+        }
         const out = JSON.stringify({ ...body, results });
         controller.enqueue(new TextEncoder().encode(out));
         controller.close();

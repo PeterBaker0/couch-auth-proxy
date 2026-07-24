@@ -4,9 +4,14 @@
  * `restrict.*` controls who may see the DB at all (and hides it from `_all_dbs`).
  * Per-method maps match the path+query after `/{db}` with `*` / `+` wildcards
  * and require the principal to hold at least one listed token.
+ *
+ * Verbose logs explain access-level and method-rule allow/deny decisions.
  */
 import type { Principal } from "../auth/types.js";
+import { createLogger, isLevelEnabled, matchingTokens } from "../util/log.js";
 import type { RestrictMap } from "./types.js";
+
+const log = createLogger("acl-restrict");
 
 /** One compiled path/query rule and the tokens that may use it. */
 export type CompiledRestrictRule = {
@@ -84,6 +89,15 @@ export function compileRestrict(restrict?: RestrictMap): CompiledRestrict {
     if (compiledRules.length) methods.set(method.toUpperCase(), compiledRules);
   }
 
+  if (isLevelEnabled("debug")) {
+    log.debug("compileRestrict", {
+      hasStar: !!star,
+      starTokens: star ? [...star].slice(0, 32) : undefined,
+      methods: [...methods.keys()],
+      ruleCounts: Object.fromEntries([...methods].map(([m, rules]) => [m, rules.length])),
+    });
+  }
+
   return { star, methods };
 }
 
@@ -99,12 +113,43 @@ export function dbAccessLevel(
   compiled: CompiledRestrict | undefined,
   noacl: boolean,
 ): 0 | 1 | 2 {
-  if (principal.admin) return 2;
-  if (!compiled?.star) {
-    return noacl ? 2 : 1;
+  if (principal.admin) {
+    if (isLevelEnabled("verbose")) {
+      log.verbose("dbAccessLevel", { user: principal.name, level: 2, reason: "admin" });
+    }
+    return 2;
   }
-  for (const token of principal.aclTokens) {
-    if (compiled.star.has(token)) return 1;
+  if (!compiled?.star) {
+    const level = noacl ? 2 : 1;
+    if (isLevelEnabled("verbose")) {
+      log.verbose("dbAccessLevel", {
+        user: principal.name,
+        level,
+        reason: noacl ? "noacl-open" : "no-restrict-star",
+        noacl,
+      });
+    }
+    return level;
+  }
+  const matched = matchingTokens(principal.aclTokens, compiled.star);
+  if (matched.length) {
+    if (isLevelEnabled("verbose")) {
+      log.verbose("dbAccessLevel", {
+        user: principal.name,
+        level: 1,
+        reason: "restrict-star-match",
+        matched,
+      });
+    }
+    return 1;
+  }
+  if (isLevelEnabled("verbose")) {
+    log.verbose("dbAccessLevel", {
+      user: principal.name,
+      level: 0,
+      reason: "restrict-star-deny",
+      required: [...compiled.star].slice(0, 32),
+    });
   }
   return 0;
 }
@@ -122,21 +167,79 @@ export function methodAllowed(
   method: string,
   urlAfterDb: string,
 ): boolean {
-  if (principal.admin) return true;
-  if (!compiled) return true;
+  if (principal.admin) {
+    if (isLevelEnabled("verbose")) {
+      log.verbose("methodAllowed", {
+        user: principal.name,
+        method,
+        urlAfterDb,
+        allowed: true,
+        reason: "admin",
+      });
+    }
+    return true;
+  }
+  if (!compiled) {
+    if (isLevelEnabled("verbose")) {
+      log.verbose("methodAllowed", {
+        user: principal.name,
+        method,
+        urlAfterDb,
+        allowed: true,
+        reason: "no-restrict",
+      });
+    }
+    return true;
+  }
   const rules = compiled.methods.get(method.toUpperCase());
-  if (!rules?.length) return true;
+  if (!rules?.length) {
+    if (isLevelEnabled("verbose")) {
+      log.verbose("methodAllowed", {
+        user: principal.name,
+        method,
+        urlAfterDb,
+        allowed: true,
+        reason: "no-method-rules",
+      });
+    }
+    return true;
+  }
 
   let matchedTokens: Set<string> | null = null;
+  let matchedPatterns = 0;
   for (const rule of rules) {
     if (rule.pattern.test(urlAfterDb)) {
+      matchedPatterns += 1;
       if (!matchedTokens) matchedTokens = new Set();
       for (const token of rule.tokens) matchedTokens.add(token);
     }
   }
-  if (!matchedTokens) return true;
-  for (const token of principal.aclTokens) {
-    if (matchedTokens.has(token)) return true;
+  if (!matchedTokens) {
+    if (isLevelEnabled("verbose")) {
+      log.verbose("methodAllowed", {
+        user: principal.name,
+        method,
+        urlAfterDb,
+        allowed: true,
+        reason: "no-pattern-match",
+        ruleCount: rules.length,
+      });
+    }
+    return true;
   }
-  return false;
+  const matched = matchingTokens(principal.aclTokens, matchedTokens);
+  const allowed = matched.length > 0;
+  if (isLevelEnabled("verbose")) {
+    log.verbose("methodAllowed", {
+      user: principal.name,
+      method,
+      urlAfterDb,
+      allowed,
+      reason: allowed ? "pattern-token-match" : "pattern-token-deny",
+      matchedPatterns,
+      required: [...matchedTokens].slice(0, 32),
+      matched,
+    });
+  }
+  return allowed;
 }

@@ -9,6 +9,9 @@
 import type { Principal } from "../auth/types.js";
 import type { DbAclState } from "../acl/cache.js";
 import { canDelete, canRead, canWrite } from "../acl/lookup.js";
+import { createLogger, isLevelEnabled } from "../util/log.js";
+
+const log = createLogger("filter-bulk");
 
 export type BulkDoc = {
   _id?: string;
@@ -76,7 +79,25 @@ export function filterBulkDocs(
     } else {
       slots.push({ id: doc._id, error: "forbidden", reason: "ACL" });
       hadDenied = true;
+      if (isLevelEnabled("verbose")) {
+        log.verbose("filterBulkDocs deny", {
+          db: state.name,
+          user: principal.name,
+          docId: doc._id,
+          action: doc._deleted ? "delete" : "write",
+        });
+      }
     }
+  }
+
+  if (isLevelEnabled("verbose")) {
+    log.verbose("filterBulkDocs", {
+      db: state.name,
+      user: principal.name,
+      requested: docs.length,
+      allowed: allowed.length,
+      hadDenied,
+    });
   }
 
   return { allowed, slots, hadDenied, rest };
@@ -124,6 +145,14 @@ export function filterRevsObject(
     ) {
       out[id] = val;
     }
+  }
+  if (isLevelEnabled("verbose")) {
+    log.verbose("filterRevsObject", {
+      db: state.name,
+      user: principal.name,
+      requested: Object.keys(body).length,
+      allowed: Object.keys(out).length,
+    });
   }
   return out;
 }

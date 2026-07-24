@@ -10,7 +10,7 @@
  */
 import type { AdminClient } from "../couch/adminClient.js";
 import type { AclRow } from "./types.js";
-import { createLogger } from "../util/log.js";
+import { createLogger, isLevelEnabled } from "../util/log.js";
 
 const log = createLogger("changes");
 
@@ -68,11 +68,15 @@ export class ChangesFollower {
     if (this.running) return;
     this.running = true;
     this.abort = new AbortController();
+    log.debug("follower start", { db: this.db, since: this.since });
     void this.loop();
   }
 
   /** Abort the in-flight feed and stop reconnecting. */
   stop(): void {
+    if (this.running) {
+      log.debug("follower stop", { db: this.db, since: this.since });
+    }
     this.running = false;
     this.abort?.abort();
     this.abort = null;
@@ -88,7 +92,12 @@ export class ChangesFollower {
       } catch (err) {
         if (!this.running) return;
         if ((err as Error)?.name === "AbortError") return;
-        log.warn("follower error", { db: this.db, err: String(err) });
+        log.warn("follower error", {
+          db: this.db,
+          err: String(err),
+          since: this.since,
+          backoffMs,
+        });
         this.handlers.onError?.(err);
         await sleep(backoffMs);
         backoffMs = Math.min(backoffMs * 2, this.maxBackoffMs);
@@ -113,6 +122,10 @@ export class ChangesFollower {
       throw new Error(`_changes ${this.db}: ${res.status}`);
     }
 
+    if (isLevelEnabled("verbose")) {
+      log.verbose("follower feed open", { db: this.db, since: this.since });
+    }
+
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -133,6 +146,7 @@ export class ChangesFollower {
           // heartbeat as the catch-up barrier for the snapshot loaded earlier.
           if (!caughtUp) {
             caughtUp = true;
+            log.debug("follower caught up", { db: this.db, since: this.since });
             this.handlers.onUp?.();
           }
           continue;
@@ -156,6 +170,15 @@ export class ChangesFollower {
         if (obj.id == null || obj.seq == null) continue;
         const nextSeq = String(obj.seq);
         const rev = typeof obj.changes?.[0]?.rev === "string" ? obj.changes[0].rev : undefined;
+        if (isLevelEnabled("verbose")) {
+          log.verbose("follower change", {
+            db: this.db,
+            id: obj.id,
+            seq: nextSeq,
+            deleted: !!obj.deleted,
+            rev,
+          });
+        }
         await this.handlers.onChange({
           id: obj.id,
           seq: nextSeq,
