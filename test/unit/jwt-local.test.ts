@@ -84,10 +84,37 @@ describe("bearerToken", () => {
 });
 
 describe("Couch session principal freshness", () => {
-  it("does not cache roles by default, so revocation is immediate", async () => {
+  it("caches roles by default for SESSION_CACHE_TTL_MS (5000)", async () => {
     const config = loadConfig({
       COUCH_URL: "http://127.0.0.1:5984",
       RATE_LIMIT_ENABLED: "false",
+    });
+    expect(config.couch.sessionCacheTtlMs).toBe(5000);
+    const responses = [
+      { ok: true, userCtx: { name: "bob", roles: ["writers"] } },
+      { ok: true, userCtx: { name: "bob", roles: [] } },
+    ];
+    const couchFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const resolver = new SessionResolver(config);
+    const headers = new Headers({ Authorization: "Basic credentials" });
+
+    expect((await resolver.resolve(headers)).roles).toEqual(["writers"]);
+    // Within the default TTL, the second resolve must reuse the cached principal.
+    expect((await resolver.resolve(headers)).roles).toEqual(["writers"]);
+    expect(couchFetch).toHaveBeenCalledTimes(1);
+    couchFetch.mockRestore();
+  });
+
+  it("re-resolves every request when SESSION_CACHE_TTL_MS=0", async () => {
+    const config = loadConfig({
+      COUCH_URL: "http://127.0.0.1:5984",
+      RATE_LIMIT_ENABLED: "false",
+      SESSION_CACHE_TTL_MS: "0",
     });
     const responses = [
       { ok: true, userCtx: { name: "bob", roles: ["writers"] } },
@@ -112,6 +139,7 @@ describe("Couch session principal freshness", () => {
     const config = loadConfig({
       COUCH_URL: "http://127.0.0.1:5984",
       RATE_LIMIT_ENABLED: "false",
+      SESSION_CACHE_TTL_MS: "0",
     });
     let inflight = 0;
     let maxInflight = 0;
