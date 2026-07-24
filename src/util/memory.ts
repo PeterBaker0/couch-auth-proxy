@@ -39,11 +39,15 @@ export function captureProcessMemory(): ProcessMemorySnapshot {
 
 /** Format bytes for harness / console output. */
 export function formatBytes(bytes: number): string {
+  const sign = bytes < 0 ? "-" : "";
   const abs = Math.abs(bytes);
-  if (abs < 1024) return `${bytes}B`;
-  if (abs < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KiB`;
-  if (abs < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)}MiB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)}GiB`;
+  if (abs < 1024) {
+    const whole = Number.isInteger(abs) ? String(abs) : abs.toFixed(1);
+    return `${sign}${whole}B`;
+  }
+  if (abs < 1024 * 1024) return `${sign}${(abs / 1024).toFixed(1)}KiB`;
+  if (abs < 1024 * 1024 * 1024) return `${sign}${(abs / (1024 * 1024)).toFixed(2)}MiB`;
+  return `${sign}${(abs / (1024 * 1024 * 1024)).toFixed(2)}GiB`;
 }
 
 /** Human-readable memory + resource lines for harness logs. */
