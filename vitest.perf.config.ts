@@ -7,7 +7,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["test/perf/**/*.test.ts"],
+    // Throughput harness only — memory soak is opt-in via vitest.perf.memory.config.ts
+    include: ["test/perf/acl-sync-load.test.ts"],
     environment: "node",
     testTimeout: 600_000,
     hookTimeout: 300_000,

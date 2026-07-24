@@ -127,6 +127,20 @@ describe("profile probes", () => {
     let snap = await (await app.request("http://localhost/_couch-auth-proxy/profile")).json();
     expect(snap.enabled).toBe(true);
     expect(snap.requests).toBe(0);
+    expect(snap.memory).toMatchObject({
+      rss: expect.any(Number),
+      heapUsed: expect.any(Number),
+      heapTotal: expect.any(Number),
+      external: expect.any(Number),
+      arrayBuffers: expect.any(Number),
+    });
+    expect(snap.resources).toMatchObject({
+      aclDbs: expect.any(Number),
+      aclRows: expect.any(Number),
+      aclTombstones: expect.any(Number),
+      sessionCacheEntries: expect.any(Number),
+      sessionInflight: expect.any(Number),
+    });
 
     // Non-probe request should be recorded (404 catch-all still runs principal).
     const miss = await app.request("http://localhost/no-such-db-for-profile");
@@ -143,5 +157,28 @@ describe("profile probes", () => {
     expect(await reset.json()).toEqual({ ok: true });
     snap = await (await app.request("http://localhost/_couch-auth-proxy/profile")).json();
     expect(snap.requests).toBe(0);
+
+    const gc = await app.request("http://localhost/_couch-auth-proxy/profile/gc", {
+      method: "POST",
+    });
+    expect(gc.status).toBe(200);
+    const gcBody = await gc.json();
+    expect(gcBody.ok).toBe(true);
+    expect(typeof gcBody.gc).toBe("boolean");
+    expect(gcBody.memory.heapUsed).toBeGreaterThan(0);
+  });
+
+  it("returns 404 for gc probe when PROFILE is off", async () => {
+    const config = loadConfig({
+      COUCH_URL: "http://127.0.0.1:5984",
+      RATE_LIMIT_ENABLED: "false",
+    });
+    const services = createServices(config);
+    services.sessions.resolve = async () => anonymousPrincipal();
+    const app = createApp(services);
+    const gc = await app.request("http://localhost/_couch-auth-proxy/profile/gc", {
+      method: "POST",
+    });
+    expect(gc.status).toBe(404);
   });
 });

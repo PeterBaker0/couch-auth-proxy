@@ -31,6 +31,7 @@
  *   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.profile.yml up -d --build
  *   pnpm test:perf:profile
  * When available, each phase scrapes `/_couch-auth-proxy/profile` (auth/acl/aclMiss/upstream/filter).
+ * Long-running memory stability soak (separate config): `pnpm test:perf:memory`.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";

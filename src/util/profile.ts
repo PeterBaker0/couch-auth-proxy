@@ -4,11 +4,14 @@
  * When enabled, middleware installs an AsyncLocalStorage request profile and
  * hot-path helpers accumulate wall time for auth / ACL / upstream / filter.
  * Aggregated stats are exposed via `/_couch-auth-proxy/profile` for the perf
- * harness; per-request phase ms are also attached to structured access logs.
+ * harness (including process memory + resource sizes); per-request phase ms
+ * are also attached to structured access logs.
  *
  * Disabled by default — zero ALS / timer cost on the hot path when off.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { ProcessMemorySnapshot, ResourceStats } from "./memory.js";
+export type { ProcessMemorySnapshot, ResourceStats } from "./memory.js";
 
 /** Timed phases on the ACL proxy hot path. */
 export const PROFILE_PHASES = ["auth", "acl", "aclMiss", "upstream", "filter"] as const;
@@ -45,6 +48,12 @@ export type ProfileSnapshot = {
    * overlap or when other work is unattributed — use as a relative signal).
    */
   phaseShareOfMean: Record<ProfilePhase, number>;
+  /**
+   * Present on scrape responses from the HTTP probe (not on bare aggregator
+   * snapshots). Process `memoryUsage()` + in-process cache sizes.
+   */
+  memory?: ProcessMemorySnapshot;
+  resources?: ResourceStats;
 };
 
 type PhaseAccum = {

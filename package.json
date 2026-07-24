@@ -16,6 +16,7 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:perf": "vitest run --config vitest.perf.config.ts",
     "test:perf:profile": "bash scripts/perf-profile.sh",
+    "test:perf:memory": "bash scripts/perf-memory.sh",
     "docker:up": "docker compose up -d --build",
     "docker:up:dev": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build",
     "docker:up:profile": "docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.profile.yml up -d --build",

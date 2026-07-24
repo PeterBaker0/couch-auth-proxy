@@ -111,6 +111,32 @@ export class AclCache {
   }
 
   /**
+   * Compact size counters for opt-in PROFILE memory scrapes.
+   * Does not walk row contents — O(dbs).
+   */
+  resourceStats(): {
+    aclDbs: number;
+    aclRows: number;
+    aclTombstones: number;
+    aclInflightEnsures: number;
+    aclInflightRefreshes: number;
+  } {
+    let aclRows = 0;
+    let aclTombstones = 0;
+    for (const state of this.dbs.values()) {
+      aclRows += state.acl.size;
+      aclTombstones += state.tombstones?.size ?? 0;
+    }
+    return {
+      aclDbs: this.dbs.size,
+      aclRows,
+      aclTombstones,
+      aclInflightEnsures: this.inflight.size,
+      aclInflightRefreshes: this.refreshInflight.size,
+    };
+  }
+
+  /**
    * Read only the bucket policy needed by `/_all_dbs`.
    *
    * Unlike `ensureDb`, this never installs `_design/acl`, starts a follower, or

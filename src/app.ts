@@ -20,6 +20,7 @@ import { bodyLimit } from "./middleware/bodyLimit.js";
 import { registerRoutes } from "./routes/register.js";
 import { jsonResponse } from "./proxy/forward.js";
 import { createLogger } from "./util/log.js";
+import { captureProcessMemory, tryForceGc, type ResourceStats } from "./util/memory.js";
 import { ProfileAggregator } from "./util/profile.js";
 
 const log = createLogger("app");
@@ -154,7 +155,7 @@ export function createApp(services: AppServices): Hono<AppEnv> {
   });
 
   /**
-   * Scrapeable phase-timing snapshot when `PROFILE=true`.
+   * Scrapeable phase-timing + memory snapshot when `PROFILE=true`.
    * Returns 404 when profiling is off so probes stay non-sensitive by default.
    */
   app.get("/_couch-auth-proxy/profile", (c) => {
@@ -162,7 +163,14 @@ export function createApp(services: AppServices): Hono<AppEnv> {
     if (!c.get("config").server.profile || !agg) {
       return jsonResponse({ error: "not_found", reason: "Profiling disabled" }, 404);
     }
-    return jsonResponse(agg.snapshot());
+    const acl = c.get("aclCache").resourceStats();
+    const session = c.get("sessions").resourceStats();
+    const resources: ResourceStats = { ...acl, ...session };
+    return jsonResponse({
+      ...agg.snapshot(),
+      memory: captureProcessMemory(),
+      resources,
+    });
   });
 
   /** Reset aggregated profile counters (load harness between phases). */
@@ -173,6 +181,22 @@ export function createApp(services: AppServices): Hono<AppEnv> {
     }
     agg.reset();
     return jsonResponse({ ok: true });
+  });
+
+  /**
+   * Best-effort V8 GC when the process was started with `--expose-gc`.
+   * Opt-in only (`PROFILE=true`); used by the memory-stability harness between samples.
+   */
+  app.post("/_couch-auth-proxy/profile/gc", (c) => {
+    if (!c.get("config").server.profile || !c.get("profileAggregator")) {
+      return jsonResponse({ error: "not_found", reason: "Profiling disabled" }, 404);
+    }
+    const ran = tryForceGc();
+    return jsonResponse({
+      ok: true,
+      gc: ran,
+      memory: captureProcessMemory(),
+    });
   });
 
   registerRoutes(app, services.accessPolicy);
