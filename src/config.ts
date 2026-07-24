@@ -6,10 +6,13 @@
  *
  * Notable knobs:
  * - `ACL_AUTO_INSTALL` — whether missing `_design/acl` is installed on app DBs
+ * - `ACL_DB_INCLUDE` / `ACL_DB_EXCLUDE` — opt-in database allow/deny lists
+ * - `ACL_ROUTE_INCLUDE` / `ACL_ROUTE_EXCLUDE` — opt-in API surface allow/deny lists
  * - `AUTH_RESOLVE_VIA_COUCH_SESSION` — forward creds to Couch `/_session` (preferred)
  * - `TRUST_PROXY_HOPS` — how many reverse-proxy hops to trust for client IP
  */
 import { z } from "zod";
+import { assertDbPatterns, assertRoutePatterns } from "./acl/envAccessPolicy.js";
 
 /** Accept boolean or common truthy env strings (`1`, `true`, `yes`, `on`). */
 const boolFromEnv = z
@@ -87,6 +90,17 @@ const ConfigSchema = z
       perIpWindowMs: z.coerce.number().int().positive().default(10_000),
       perIpMaxRequests: z.coerce.number().int().positive().default(100),
     }),
+    /**
+     * Opt-in env access policy. Empty include+exclude lists preserve historical
+     * behaviour (all typical DBs / restmap routes remain reachable subject to
+     * per-doc ACL and `restrict.*`).
+     */
+    access: z.object({
+      dbInclude: z.array(z.string()).default([]),
+      dbExclude: z.array(z.string()).default([]),
+      routeInclude: z.array(z.string()).default([]),
+      routeExclude: z.array(z.string()).default([]),
+    }),
   })
   .superRefine((config, ctx) => {
     if (!config.auth.resolveViaCouchSession && !config.auth.jwt.enabled) {
@@ -101,6 +115,42 @@ const ConfigSchema = z
         code: z.ZodIssueCode.custom,
         path: ["auth", "jwt", "hmacSecret"],
         message: "JWT_HMAC_SECRET is required when JWT_LOCAL_VERIFY is enabled",
+      });
+    }
+    try {
+      assertDbPatterns(config.access.dbInclude, "ACL_DB_INCLUDE");
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["access", "dbInclude"],
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    try {
+      assertDbPatterns(config.access.dbExclude, "ACL_DB_EXCLUDE");
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["access", "dbExclude"],
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    try {
+      assertRoutePatterns(config.access.routeInclude, "ACL_ROUTE_INCLUDE");
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["access", "routeInclude"],
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+    try {
+      assertRoutePatterns(config.access.routeExclude, "ACL_ROUTE_EXCLUDE");
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["access", "routeExclude"],
+        message: err instanceof Error ? err.message : String(err),
       });
     }
   });
@@ -170,6 +220,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       maxRequests: env.RATE_LIMIT_MAX ?? 100,
       perIpWindowMs: env.RATE_LIMIT_IP_WINDOW_MS ?? 10_000,
       perIpMaxRequests: env.RATE_LIMIT_IP_MAX ?? 100,
+    },
+    access: {
+      dbInclude: splitCsv(env.ACL_DB_INCLUDE),
+      dbExclude: splitCsv(env.ACL_DB_EXCLUDE),
+      routeInclude: splitCsv(env.ACL_ROUTE_INCLUDE),
+      routeExclude: splitCsv(env.ACL_ROUTE_EXCLUDE),
     },
   });
 }

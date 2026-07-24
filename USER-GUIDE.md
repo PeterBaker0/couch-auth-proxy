@@ -117,7 +117,7 @@ A normal application DB (e.g. `acldemo`) is ACL-enabled when it has `_design/acl
 
 Without a usable ACL map, the DB is **`noacl`**: the proxy only applies `restrict` (if any) and otherwise passes through to Couch `_security`.
 
-**`/_all_dbs`** is filtered: DBs with `restrict.*` only appear for principals who match that list.
+**`/_all_dbs`** is filtered: DBs with `restrict.*` only appear for principals who match that list. Operators may also set process-wide `ACL_DB_INCLUDE` / `ACL_DB_EXCLUDE` (and `ACL_ROUTE_*`) env lists to further hide databases or API surfaces for non-admins — see the README “Env access policy” section.
 
 ### Couch `_security` vs proxy ACL
 
