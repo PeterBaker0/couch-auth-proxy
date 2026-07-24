@@ -45,6 +45,24 @@ describe("profile util", () => {
     expect(profile.phases.filter).toBeGreaterThan(0);
   });
 
+  it("coalesces concurrent nested spans of the same phase", async () => {
+    const profile = createRequestProfile();
+    await runWithProfile(profile, async () => {
+      await Promise.all([
+        profileAsync("aclMiss", async () => {
+          await new Promise((r) => setTimeout(r, 20));
+        }),
+        profileAsync("aclMiss", async () => {
+          await new Promise((r) => setTimeout(r, 20));
+        }),
+      ]);
+    });
+    // Two parallel 20ms spans should attribute ~20ms wall, not ~40ms.
+    expect(profile.counts.aclMiss).toBe(2);
+    expect(profile.phases.aclMiss).toBeGreaterThan(15);
+    expect(profile.phases.aclMiss).toBeLessThan(35);
+  });
+
   it("aggregator snapshot reports per-request means", () => {
     const agg = new ProfileAggregator();
     const a = createRequestProfile();

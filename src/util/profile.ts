@@ -17,6 +17,10 @@ export type ProfilePhase = (typeof PROFILE_PHASES)[number];
 export type RequestProfile = {
   phases: Record<ProfilePhase, number>;
   counts: Record<ProfilePhase, number>;
+  /** Nesting depth per phase — avoids double-counting concurrent fan-out. */
+  active: Record<ProfilePhase, number>;
+  /** Wall-clock start of the outermost active span per phase. */
+  activeStarted: Record<ProfilePhase, number>;
 };
 
 export type PhaseStats = {
@@ -59,9 +63,34 @@ function emptyCounts(): Record<ProfilePhase, number> {
   return { auth: 0, acl: 0, aclMiss: 0, upstream: 0, filter: 0 };
 }
 
+function emptyActive(): Record<ProfilePhase, number> {
+  return { auth: 0, acl: 0, aclMiss: 0, upstream: 0, filter: 0 };
+}
+
 /** Create an empty per-request profile bag. */
 export function createRequestProfile(): RequestProfile {
-  return { phases: emptyPhases(), counts: emptyCounts() };
+  return {
+    phases: emptyPhases(),
+    counts: emptyCounts(),
+    active: emptyActive(),
+    activeStarted: emptyPhases(),
+  };
+}
+
+function enterPhase(profile: RequestProfile, phase: ProfilePhase): void {
+  if (profile.active[phase] === 0) {
+    profile.activeStarted[phase] = performance.now();
+  }
+  profile.active[phase] += 1;
+  profile.counts[phase] += 1;
+}
+
+function leavePhase(profile: RequestProfile, phase: ProfilePhase): void {
+  profile.active[phase] -= 1;
+  if (profile.active[phase] === 0) {
+    profile.phases[phase] += performance.now() - profile.activeStarted[phase];
+    profile.activeStarted[phase] = 0;
+  }
 }
 
 /** Current request profile, if profiling is active for this async chain. */
@@ -82,31 +111,31 @@ export function addProfileMs(phase: ProfilePhase, ms: number): void {
   profile.counts[phase] += 1;
 }
 
-/** Time an async function against a profile phase (no-op overhead when inactive). */
+/**
+ * Time an async function against a profile phase.
+ * Nested/concurrent spans of the same phase coalesce to outer wall time so
+ * `ensureDocRows` fan-out does not over-count `aclMiss`.
+ */
 export async function profileAsync<T>(phase: ProfilePhase, fn: () => Promise<T>): Promise<T> {
   const profile = als.getStore();
   if (!profile) return fn();
-  const t0 = performance.now();
+  enterPhase(profile, phase);
   try {
     return await fn();
   } finally {
-    const ms = performance.now() - t0;
-    profile.phases[phase] += ms;
-    profile.counts[phase] += 1;
+    leavePhase(profile, phase);
   }
 }
 
-/** Time a sync function against a profile phase. */
+/** Time a sync function against a profile phase (nest-safe). */
 export function profileSync<T>(phase: ProfilePhase, fn: () => T): T {
   const profile = als.getStore();
   if (!profile) return fn();
-  const t0 = performance.now();
+  enterPhase(profile, phase);
   try {
     return fn();
   } finally {
-    const ms = performance.now() - t0;
-    profile.phases[phase] += ms;
-    profile.counts[phase] += 1;
+    leavePhase(profile, phase);
   }
 }
 
