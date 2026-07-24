@@ -77,12 +77,9 @@ export async function forwardToCouch(
 ): Promise<Response> {
   try {
     const upstream = await fetchFromCouch(c, config, options);
-    return toClientResponse(upstream, {
+    return toClientResponseFromCouch(upstream, config, {
       keepEncoding: options?.keepEncoding,
       stripHeaders: options?.stripResponseHeaders,
-      rewriteLocation: {
-        fromOrigin: new URL(config.couch.url).origin,
-      },
     });
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
@@ -175,41 +172,41 @@ export async function fetchFromCouch(
       status: response.status,
     });
   }
-  const location = response.headers.get("location");
-  if (!location) return response;
+  // Return the raw upstream Response. Location rewriting belongs only in
+  // toClientResponse / toClientResponseFromCouch — wrapping here and again
+  // there double-attaches the body stream and can throw
+  // "Response body object should not be disturbed or locked".
+  return response;
+}
 
-  // Couch commonly emits absolute redirects using its private upstream
-  // origin. Exposing that URL can let a client leave the ACL proxy when Couch
-  // is also reachable on an internal or development network. Preserve
-  // same-origin redirects as origin-relative client locations.
-  try {
-    const target = new URL(location, url);
-    if (target.origin !== couchBase.origin) return response;
-    const headers = new Headers(response.headers);
-    headers.set("Location", `${target.pathname}${target.search}${target.hash}`);
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers,
-    });
-  } catch {
-    return response;
-  }
+export type ClientResponseOptions = {
+  keepEncoding?: boolean;
+  body?: ReadableStream<Uint8Array> | string | null;
+  stripHeaders?: string[];
+  rewriteLocation?: { fromOrigin: string };
+};
+
+/**
+ * Convert an upstream Couch Response into a client Response, rewriting
+ * absolute same-origin Location headers to path-only form so the private
+ * Couch origin is never advertised.
+ */
+export function toClientResponseFromCouch(
+  upstream: Response,
+  config: AppConfig,
+  options?: Omit<ClientResponseOptions, "rewriteLocation">,
+): Response {
+  return toClientResponse(upstream, {
+    ...options,
+    rewriteLocation: { fromOrigin: new URL(config.couch.url).origin },
+  });
 }
 
 /**
  * Convert an upstream Response into a client Response, stripping hop-by-hop
  * headers and (by default) content-encoding so Node can re-encode if needed.
  */
-export function toClientResponse(
-  upstream: Response,
-  options?: {
-    keepEncoding?: boolean;
-    body?: ReadableStream<Uint8Array> | string | null;
-    stripHeaders?: string[];
-    rewriteLocation?: { fromOrigin: string };
-  },
-): Response {
+export function toClientResponse(upstream: Response, options?: ClientResponseOptions): Response {
   const responseHeaders = new Headers();
   const stripHeaders = new Set((options?.stripHeaders ?? []).map((header) => header.toLowerCase()));
   const decoded = !options?.keepEncoding && upstream.headers.has("content-encoding");

@@ -308,6 +308,29 @@ describe("integration ACL", () => {
     expect(body.error).toBe("not_found");
   });
 
+  it("PUT Location is relative and never leaks the Couch origin", async () => {
+    const headers = authHeaders("basic", "alice", "alice-pass");
+    const put = await putDoc(`loc-probe-${suffix}`, { creator: "alice", hello: true }, headers);
+    expect(put.status).toBe(201);
+    const location = put.headers.get("location");
+    expect(location).toBeTruthy();
+    expect(location!).toMatch(new RegExp(`^/${DB}/loc-probe-${suffix}$`));
+    expect(location!.toLowerCase()).not.toContain("couchdb");
+    expect(location!).not.toMatch(/^https?:\/\//i);
+
+    // Stress the fetchFromCouch → toClientResponse path; double-wrap races are rare.
+    for (let i = 0; i < 20; i++) {
+      const id = `loc-loop-${suffix}-${i}`;
+      const res = await putDoc(id, { creator: "alice", n: i }, headers);
+      expect(res.status, await res.text()).toBe(201);
+      const loc = res.headers.get("location");
+      expect(loc).toBeTruthy();
+      expect(loc!).not.toMatch(/^https?:\/\//i);
+      expect(loc!.toLowerCase()).not.toContain("couchdb");
+      expect(loc!).toBe(`/${DB}/${id}`);
+    }
+  });
+
   it("COPY requires source read and destination write", async () => {
     const src = `copy-src-${suffix}`;
     const dst = `copy-dst-${suffix}`;
