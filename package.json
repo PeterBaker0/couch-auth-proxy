@@ -1,6 +1,6 @@
 {
   "name": "couch-auth-proxy",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "private": true,
   "description": "Per-document r/w/d ACL proxy for Apache CouchDB 3.5+",
   "license": "MIT",
