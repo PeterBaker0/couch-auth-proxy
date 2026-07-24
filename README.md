@@ -121,6 +121,8 @@ Unmapped endpoints return **404** for non-admins (default-deny). `_list`, `_show
 | `COUCH_ADMIN_USER` / `COUCH_ADMIN_PASSWORD` or `COUCH_ADMIN_URL` | Admin for ACL maintenance + `_changes` follow                                                                                                                                                                                                                          |
 | `COUCH_PRELOAD_DBS`                                              | Comma-separated DBs to warm on boot                                                                                                                                                                                                                                    |
 | `ACL_AUTO_INSTALL`                                               | Auto-PUT `_design/acl` when missing on app DBs (default `true`). Never installs into `_users` / `_replicator` / `_global_changes`. Prefer `false` in production when ddocs are provisioned out-of-band.                                                                |
+| `ACL_DB_INCLUDE` / `ACL_DB_EXCLUDE`                              | Opt-in database allow/deny lists (CSV). Entries are exact names or `/regex/flags`. Empty = historical behaviour. Exclude wins. Non-admins only; hidden DBs are omitted from `/_all_dbs` and return **404**. Example: `ACL_DB_INCLUDE=/^data-/`.                        |
+| `ACL_ROUTE_INCLUDE` / `ACL_ROUTE_EXCLUDE`                        | Opt-in API surface allow/deny lists (CSV). Entries are feature/bundle names (`pouch-sync`, `session`, `changes`, …), `METHOD /restmap-path` templates, or `/regex/flags` over `METHOD pathname`. Empty = all restmap routes. Exclude wins. Non-admins get **403**.     |
 | `AUTH_RESOLVE_VIA_COUCH_SESSION`                                 | Default `true`                                                                                                                                                                                                                                                         |
 | `JWT_LOCAL_VERIFY` / `JWT_HMAC_SECRET`                           | Optional local Bearer JWT verification; required together when Couch session resolution is disabled                                                                                                                                                                    |
 | `JWT_ROLES_CLAIM_PATH` / `JWT_REQUIRED_CLAIMS`                   | Local JWT role claim path and comma-separated required claims                                                                                                                                                                                                          |
@@ -135,6 +137,30 @@ Unmapped endpoints return **404** for non-admins (default-deny). `_list`, `_show
 | `LOG_LEVEL`                                                      | Minimum log level: `verbose`, `debug`, `info`, `warn`, `error` (aliases: `trace`→`verbose`, `warning`→`warn`). Default `debug` outside production, `info` in production. Use `verbose` to trace ACL allow/deny decisions (actors, resolvers, filters, session tokens). |
 
 Structured JSON logs go to stdout/stderr (`ts`, `level`, `component`, `msg`, …). Secret-looking fields (`authorization`, `cookie`, `password`, `token`, `secret`, …) are redacted.
+
+### Env access policy (opt-in)
+
+Empty `ACL_DB_*` / `ACL_ROUTE_*` lists leave behaviour unchanged. When set, lists are compiled once at process start (exact `Set` lookups + precompiled `RegExp`s) so the hot path stays cheap under high QPS.
+
+```bash
+# Only expose data-* databases to non-admins (hide everything else as 404)
+ACL_DB_INCLUDE=/^data-/
+
+# Pouch-style sync APIs only (block Mango, Fauxton, admin endpoints, …)
+ACL_ROUTE_INCLUDE=pouch-sync
+ACL_ROUTE_EXCLUDE=admin
+```
+
+Route entries may be:
+
+| Form                   | Example                                      | Matches                         |
+| ---------------------- | -------------------------------------------- | ------------------------------- |
+| Feature                | `changes`, `docs`, `session`                 | Tagged restmap routes           |
+| Bundle                 | `pouch-sync`, `server`, `documents`, `query` | Expanded feature sets           |
+| Method + path template | `GET /:db/_changes`                          | Exact restmap `method` + `path` |
+| Regex                  | `/^GET \/data-[^/]+\/_changes$/`             | `METHOD` + request pathname     |
+
+Feature catalog: `root`, `up`, `uuids`, `session`, `all_dbs`, `db`, `docs`, `attachments`, `design`, `local`, `all_docs`, `changes`, `bulk_docs`, `bulk_get`, `find`, `index`, `views`, `show`, `update`, `copy`, `revs`, `partition`, `admin`. Couch admins bypass both policies (same as `restrict.*`). Proxy probes under `/_couch-auth-proxy/*` are never gated.
 
 Probes (bodies are non-sensitive `{ "ok": true|false }` only):
 
@@ -182,6 +208,6 @@ pnpm test:integration         # needs stack up
 
 Pre-commit runs `oxfmt` on staged files via husky + lint-staged (`pnpm prepare` after install).
 
-Integration includes PouchDB in-memory sync (`test/integration/pouch-sync.test.ts`), a real CouchDB 3.5 partitioned database (`partitioned.test.ts`), and fail-closed security edges (`security-edges.test.ts`, `security-deep.test.ts`): attachments (inline/`_bulk_get`/`_changes`/unicode/Range), custom views + reduce/group rejection (query **and** POST body), keyed vs non-keyed list id-leak guards, deletion tombstones, design-doc filters + `style=all_docs`, `open_revs`/meta probes, filtered replica streams (`doc_ids` / selector / longpoll / eventsource), bulk `all_or_nothing` / `new_edits:false`, `_show`/`_update` without doc id, `_explain`/index admin-only, `_local` checkpoints, ACL revocation, and `restrict` rules.
+Integration includes PouchDB in-memory sync (`test/integration/pouch-sync.test.ts`), a real CouchDB 3.5 partitioned database (`partitioned.test.ts`), env DB/route access policy (`env-access-policy.test.ts`), and fail-closed security edges (`security-edges.test.ts`, `security-deep.test.ts`): attachments (inline/`_bulk_get`/`_changes`/unicode/Range), custom views + reduce/group rejection (query **and** POST body), keyed vs non-keyed list id-leak guards, deletion tombstones, design-doc filters + `style=all_docs`, `open_revs`/meta probes, filtered replica streams (`doc_ids` / selector / longpoll / eventsource), bulk `all_or_nothing` / `new_edits:false`, `_show`/`_update` without doc id, `_explain`/index admin-only, `_local` checkpoints, ACL revocation, and `restrict` rules.
 
 # couch-auth-proxy

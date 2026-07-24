@@ -11,6 +11,7 @@ import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { AppConfig } from "./config.js";
 import { AclCache, AclUnavailableError } from "./acl/cache.js";
+import { compileAccessPolicy, type CompiledAccessPolicy } from "./acl/envAccessPolicy.js";
 import { SessionResolver } from "./auth/session.js";
 import { withPrincipal, withServices, type AppEnv } from "./middleware/context.js";
 import { rateLimit } from "./middleware/rateLimit.js";
@@ -27,14 +28,16 @@ export type AppServices = {
   config: AppConfig;
   sessions: SessionResolver;
   aclCache: AclCache;
+  accessPolicy: CompiledAccessPolicy;
 };
 
-/** Construct session resolver + ACL cache from validated config. */
+/** Construct session resolver + ACL cache + compiled env access policy. */
 export function createServices(config: AppConfig): AppServices {
   return {
     config,
     sessions: new SessionResolver(config),
     aclCache: new AclCache(config),
+    accessPolicy: compileAccessPolicy(config.access),
   };
 }
 
@@ -137,7 +140,7 @@ export function createApp(services: AppServices): Hono<AppEnv> {
     return jsonResponse({ ok: ready }, ready ? 200 : 503);
   });
 
-  registerRoutes(app);
+  registerRoutes(app, services.accessPolicy);
 
   // Keyed ACL view failures may happen after the DB gate. Keep their response
   // fail-closed and Couch-shaped instead of exposing a generic Hono 500.

@@ -17,6 +17,7 @@ import {
   type AclCache,
   type DbAclState,
 } from "../acl/cache.js";
+import { isDbAllowedByPolicy } from "../acl/envAccessPolicy.js";
 import { isDatabaseName, isDocumentId } from "../acl/names.js";
 import { dbAccessLevel, methodAllowed } from "../acl/restrict.js";
 import { canDelete, canRead, ensureDocRow, flagsForDoc } from "../acl/lookup.js";
@@ -217,8 +218,9 @@ export const actors: Record<string, Actor> = {
   },
 
   /**
-   * Database gate: ensure ACL cache, enforce `restrict.*` / method rules,
-   * attach `dbAclState`. `noacl` DBs pipe immediately (Couch `_security` only).
+   * Database gate: env DB policy, ensure ACL cache, enforce `restrict.*` /
+   * method rules, attach `dbAclState`. `noacl` DBs pipe immediately
+   * (Couch `_security` only).
    */
   async db(c, next) {
     const db = c.req.param("db");
@@ -233,6 +235,22 @@ export const actors: Record<string, Actor> = {
         "debug",
       );
       return couchError("forbidden", "Access denied.", 403);
+    }
+
+    // Env DB include/exclude runs before ACL cache warm-up (cheap deny).
+    const principalEarly = c.get("principal");
+    if (!isDbAllowedByPolicy(c.get("accessPolicy"), db, principalEarly)) {
+      logDecision(
+        "db",
+        {
+          decision: "deny",
+          reason: "env-db-policy",
+          db,
+          user: principalEarly.name,
+        },
+        "debug",
+      );
+      return couchError("not_found", "Database does not exist.", 404);
     }
 
     let state;
@@ -978,8 +996,8 @@ export const actors: Record<string, Actor> = {
   },
 
   /**
-   * `_all_dbs`: hide DBs the principal cannot access via `restrict.*`.
-   * Admins see DBs even when ACL ensure fails.
+   * `_all_dbs`: hide DBs the principal cannot access via env DB policy or
+   * `restrict.*`. Admins see DBs even when ACL ensure fails.
    */
   async dblist(c) {
     const upstream = await fetchFromCouch(c, c.get("config"), {
@@ -1004,9 +1022,14 @@ export const actors: Record<string, Actor> = {
       return toClientResponse(upstream, { body: JSON.stringify(dbs) });
     }
 
+    const accessPolicy = c.get("accessPolicy");
     const cache = c.get("aclCache");
     const visible: string[] = [];
     for (const db of dbs) {
+      if (!isDbAllowedByPolicy(accessPolicy, db, principal)) {
+        logDecision("dblist", { decision: "hide", reason: "env-db-policy", db }, "verbose");
+        continue;
+      }
       try {
         const policy = await cache.inspectAccessPolicy(db);
         if (dbAccessLevel(principal, policy.compiledRestrict, policy.noacl) > 0) {

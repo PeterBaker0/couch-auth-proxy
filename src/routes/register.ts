@@ -6,25 +6,51 @@
  * or call `next()`. If the chain ends without a Response, the request is piped
  * to Couch.
  *
+ * When an env route policy is active, a precompiled per-route gate runs before
+ * the actor chain (O(1) for feature/template-only policies; regexes are
+ * compiled once at startup).
+ *
  * Unmapped paths are default-denied for non-admins (403 for `/_*`, else 404).
  * Admins may pipe anything unmapped.
  */
 import type { Hono } from "hono";
 import type { AppEnv } from "../middleware/context.js";
+import { compileRouteGate, type CompiledAccessPolicy } from "../acl/envAccessPolicy.js";
 import { ROUTES, type ActorName, type HttpMethod } from "./restmap.js";
 import { actors, type Actor } from "./actors.js";
 import { couchError, forwardToCouch } from "../proxy/forward.js";
-import { createLogger } from "../util/log.js";
+import { createLogger, isLevelEnabled } from "../util/log.js";
 
 const log = createLogger("routes");
 
 /**
  * Register all restmap routes plus the default-deny catch-all.
  */
-export function registerRoutes(app: Hono<AppEnv>): void {
+export function registerRoutes(app: Hono<AppEnv>, accessPolicy?: CompiledAccessPolicy): void {
   for (const route of ROUTES) {
     const chain = route.actors.map((name) => resolveActor(name));
-    const handler = compose(chain);
+    const gate = accessPolicy ? compileRouteGate(accessPolicy, route) : null;
+    const gated: Actor[] = gate
+      ? [
+          async (c, next) => {
+            const principal = c.get("principal");
+            if (!gate.allowed(principal, c.req.method, c.req.path)) {
+              if (isLevelEnabled("debug")) {
+                log.debug("route policy deny", {
+                  method: c.req.method,
+                  path: c.req.path,
+                  user: principal.name,
+                  features: route.features,
+                });
+              }
+              return couchError("forbidden", "Endpoint not allowed.", 403);
+            }
+            await next();
+          },
+          ...chain,
+        ]
+      : chain;
+    const handler = compose(gated);
     mount(app, route.method, route.path, handler);
   }
 

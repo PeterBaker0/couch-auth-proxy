@@ -8,6 +8,7 @@
 import { createMiddleware } from "hono/factory";
 import type { AppConfig } from "../config.js";
 import type { AclCache, DbAclState } from "../acl/cache.js";
+import type { CompiledAccessPolicy } from "../acl/envAccessPolicy.js";
 import type { SessionResolver } from "../auth/session.js";
 import type { Principal } from "../auth/types.js";
 import { createLogger, isLevelEnabled } from "../util/log.js";
@@ -20,22 +21,25 @@ export type AppEnv = {
     config: AppConfig;
     sessions: SessionResolver;
     aclCache: AclCache;
+    accessPolicy: CompiledAccessPolicy;
     principal: Principal;
     /** Set by the `db` actor once ACL state is ready for this request. */
     dbAclState?: DbAclState;
   };
 };
 
-/** Inject config / session resolver / ACL cache into every request. */
+/** Inject config / session resolver / ACL cache / access policy into every request. */
 export function withServices(deps: {
   config: AppConfig;
   sessions: SessionResolver;
   aclCache: AclCache;
+  accessPolicy: CompiledAccessPolicy;
 }) {
   return createMiddleware<AppEnv>(async (c, next) => {
     c.set("config", deps.config);
     c.set("sessions", deps.sessions);
     c.set("aclCache", deps.aclCache);
+    c.set("accessPolicy", deps.accessPolicy);
     await next();
   });
 }
