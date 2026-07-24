@@ -132,7 +132,7 @@ Unmapped endpoints return **404** for non-admins (default-deny). `_list`, `_show
 | `COUCH_MAX_ID_LENGTH`                                            | Maximum accepted document-id length (default `200`)                                                                                                                                                                                                                    |
 | `CORS_ORIGINS`                                                   | Comma allowlist (**required for browser CORS**; empty = no Origin reflection)                                                                                                                                                                                          |
 | `TRUST_PROXY_HOPS`                                               | Trusted reverse-proxy hops for client IP (default `0` = ignore `X-Forwarded-For`)                                                                                                                                                                                      |
-| `SESSION_CACHE_TTL_MS` / `SESSION_CACHE_MAX`                     | Session principal cache TTL (default `0`, disabled) + LRU size. Enabling it accepts a role/admin revocation delay up to the configured TTL.                                                                                                                            |
+| `SESSION_CACHE_TTL_MS` / `SESSION_CACHE_MAX`                     | Session principal cache TTL (default `0`, disabled) + LRU size. Concurrent identical credentials are already coalesced into one `/_session` fetch with no TTL. Enabling a TTL further cuts sequential auth cost but delays role/admin revocation up to that window.   |
 | `RATE_LIMIT_*`                                                   | Global + per-IP limits                                                                                                                                                                                                                                                 |
 | `MAX_BODY_BYTES`                                                 | Request body ceiling (Content-Length + streamed bodies)                                                                                                                                                                                                                |
 | `SHUTDOWN_TIMEOUT_MS`                                            | Drain timeout before force-exit                                                                                                                                                                                                                                        |
@@ -217,6 +217,24 @@ pnpm test:perf                # writes test/perf/last-results.json; not in CI
 pnpm test:perf:profile        # compose profile overlay + scrape /_couch-auth-proxy/profile
 # Host CPU profile (after pnpm build; Couch on :5985 via docker:up:dev):
 #   PROFILE=true pnpm start:profile   # writes CPU profiles under ./profiles/
+```
+
+### Performance notes
+
+Hot-path costs under the ACL harness are usually **upstream Couch RTT**, then **auth** (`GET /_session`), then **aclMiss** (ensure/refresh). In-process ACL filter CPU is typically negligible when the cache is warm.
+
+Safe defaults (no revocation delay):
+
+- Concurrent identical credentials share one in-flight `/_session` lookup
+- Unknown-id ensure uses existence-first `_all_docs` (create path)
+- Successful JSON writes on the shipped ACL map update the cache from the body (still refresh from the view for `new_edits:false` / custom maps)
+- Multi-key ACL view refresh for bulk ensure/write paths
+
+**Product decision — `SESSION_CACHE_TTL_MS`:** still default `0`. A short TTL (e.g. `5000`) removes most remaining per-request auth overhead on sequential traffic, but role/`_admin` changes from Couch can lag by up to that TTL. Prefer keeping `0` when immediate revocation matters; enable only when the deployment accepts that window.
+
+```bash
+# Optional experiment (not the default):
+# SESSION_CACHE_TTL_MS=5000 pnpm test:perf:profile
 ```
 
 Pre-commit runs `oxfmt` on staged files via husky + lint-staged (`pnpm prepare` after install).
