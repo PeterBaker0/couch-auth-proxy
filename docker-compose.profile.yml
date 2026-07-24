@@ -1,11 +1,15 @@
-# Profiling overlay: enables request phase timers on the proxy.
+# Profiling overlay: enables request phase timers + memory probe on the proxy.
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.profile.yml up -d --build
 #   pnpm test:perf:profile
+#   pnpm test:perf:memory
 services:
   couch-auth-proxy:
     environment:
       PROFILE: "true"
+      # Expose V8 GC for optional POST /_couch-auth-proxy/profile/gc samples used
+      # by the memory-stability soak. Harmless when unused; still opt-in via this overlay.
+      NODE_OPTIONS: "--expose-gc"
       # Session principal cache defaults to 5000ms in the app. Override here to
       # attribute auth vs ACL under an alternate TTL (0 = re-resolve every request).
       # SESSION_CACHE_TTL_MS: "0"

@@ -39,6 +39,17 @@ export class SessionResolver {
   }
 
   /**
+   * Compact size counters for opt-in PROFILE memory scrapes.
+   * Session cache is LRU-bounded (`SESSION_CACHE_MAX`); inflight should stay near 0 at rest.
+   */
+  resourceStats(): { sessionCacheEntries: number; sessionInflight: number } {
+    return {
+      sessionCacheEntries: this.cache.size,
+      sessionInflight: this.inflight.size,
+    };
+  }
+
+  /**
    * Resolve identity from incoming request headers.
    * Missing credentials → anonymous. Couch 401 → anonymous (upstream may still reject).
    */

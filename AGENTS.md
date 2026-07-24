@@ -20,7 +20,8 @@ This is `couch-auth-proxy`: a TypeScript (Hono) reverse proxy that enforces per-
 - `pnpm lint`, `pnpm fmt:check`, `pnpm typecheck`, `pnpm test` (unit) need no running services.
 - `pnpm test:integration` requires the docker stack up first (`docker compose up -d --build`); it hits the proxy at `http://127.0.0.1:8000`.
 - `pnpm test:perf` is the ACL load harness (multi-client Pouch sync + HTTP r/w ops/sec). Prefer the dev overlay so direct Couch is on `5985` for overhead compare: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build`. Not part of CI.
-- Request phase profiling: set `PROFILE=true` (compose overlay `docker-compose.profile.yml`, or `pnpm docker:up:profile`). Scrapes `GET /_couch-auth-proxy/profile` (auth / acl / aclMiss / upstream / filter). Convenience: `pnpm test:perf:profile`. Host CPU profiles: build then `pnpm start:profile` (writes under `profiles/`).
+- Request phase profiling: set `PROFILE=true` (compose overlay `docker-compose.profile.yml`, or `pnpm docker:up:profile`). Scrapes `GET /_couch-auth-proxy/profile` (auth / acl / aclMiss / upstream / filter + process memory / resource sizes). Convenience: `pnpm test:perf:profile`. Host CPU profiles: build then `pnpm start:profile` (writes under `profiles/`).
+- Memory stability soak (opt-in): `pnpm test:perf:memory` brings up the profile overlay (`PROFILE=true`, `NODE_OPTIONS=--expose-gc`), runs a multi-minute steady-state ACL load while scraping heap/rss trends, and writes `test/perf/last-memory-report.md`. Tunable via `PERF_MEMORY_DURATION_SEC` (default 300).
 
 ### Gotchas
 

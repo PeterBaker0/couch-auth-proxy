@@ -10,6 +10,9 @@ coverage/
 .pnpm-store/
 test/perf/last-results.json
 test/perf/last-profile.json
+test/perf/last-memory-results.json
+test/perf/last-memory-report.md
+test/perf/last-memory-profile.json
 test/perf/*-results.json
 profiles/
 package-lock.json
