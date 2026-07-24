@@ -273,6 +273,12 @@ describe("AclCache row refresh failures", () => {
       followerUp: true,
     };
     (cache as unknown as { dbs: Map<string, DbAclState> }).dbs.set("acldemo", state);
+    cache.adminClient.json = vi.fn(async (path: string) => {
+      if (path.includes("/_view/acl")) {
+        return { ok: true as const, status: 200, body: { rows: [{ key: "secret" }] } };
+      }
+      return { ok: false as const, status: 404, text: "missing" };
+    }) as typeof cache.adminClient.json;
 
     await (
       cache as unknown as {
@@ -289,6 +295,71 @@ describe("AclCache row refresh failures", () => {
     expect(state.acl.has("secret")).toBe(true);
     expect(state.acl.get("secret")?._r["u-bob"]).toBe(1);
     expect(state.acl.get("secret")?.deleted).toBe(true);
+  });
+
+  it("does not mark a recreated document deleted when a stale delete arrives", async () => {
+    const cache = cacheWithState({
+      name: "acldemo",
+      acl: new Map([
+        [
+          "revived",
+          {
+            s: "3-live",
+            p: "",
+            deleted: true,
+            _r: { "u-alice": 1 },
+            _w: { "u-alice": 1 },
+            _d: { "u-alice": 1 },
+          },
+        ],
+      ]),
+      noacl: false,
+      ready: true,
+      followerUp: true,
+    });
+    const state = cache.get("acldemo")!;
+    cache.adminClient.json = vi.fn(async (path: string) => {
+      if (path.includes("/_view/acl")) {
+        return {
+          ok: true as const,
+          status: 200,
+          body: {
+            rows: [
+              {
+                key: "revived",
+                value: {
+                  s: "3-live",
+                  p: "",
+                  _r: { "u-alice": 1, "u-bob": 1 },
+                  _w: { "u-alice": 1 },
+                  _d: { "u-alice": 1 },
+                },
+              },
+            ],
+          },
+        };
+      }
+      return { ok: false as const, status: 404, text: "missing" };
+    }) as typeof cache.adminClient.json;
+
+    await (
+      cache as unknown as {
+        applyChange: (
+          db: string,
+          state: DbAclState,
+          id: string,
+          deleted?: boolean,
+          rev?: string,
+        ) => Promise<void>;
+      }
+    ).applyChange("acldemo", state, "revived", true, "2-dead");
+
+    expect(state.acl.get("revived")).toMatchObject({
+      s: "3-live",
+      _r: { "u-alice": 1, "u-bob": 1 },
+    });
+    expect(state.acl.get("revived")?.deleted).toBeUndefined();
+    expect(state.tombstones?.has("revived") ?? false).toBe(false);
   });
 
   it("deletes ACL rows when the view confirms absence", async () => {
@@ -440,6 +511,9 @@ describe("AclCache row refresh failures", () => {
 
     cache.adminClient.json = vi.fn(
       async (path: string, init?: { query?: Record<string, string> }) => {
+        if (path.includes("/_view/acl")) {
+          return { ok: true as const, status: 200, body: { rows: [{ key: "cold" }] } };
+        }
         const rev = init?.query?.rev;
         if (rev === "2-del" && init?.query?.revs === "true") {
           return {
@@ -494,7 +568,10 @@ describe("AclCache row refresh failures", () => {
     });
     const state = cache.get("acldemo")!;
     cache.adminClient.json = vi.fn(
-      async (_path: string, init?: { query?: Record<string, string> }) => {
+      async (path: string, init?: { query?: Record<string, string> }) => {
+        if (path.includes("/_view/acl")) {
+          return { ok: true as const, status: 200, body: { rows: [{ key: "open-deleted" }] } };
+        }
         if (init?.query?.rev === "2-deleted") {
           return {
             ok: true as const,

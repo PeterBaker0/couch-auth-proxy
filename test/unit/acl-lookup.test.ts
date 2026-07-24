@@ -49,7 +49,7 @@ describe("flagsForDoc", () => {
     });
   });
 
-  it("allows recreate writes on deleted tombstones while retaining prior read grants", () => {
+  it("uses retained tombstone grants for recreate/write (not universal create-path)", () => {
     const state = emptyState();
     state.acl.set("gone", {
       s: "2-deleted",
@@ -59,14 +59,19 @@ describe("flagsForDoc", () => {
       _w: { "u-alice": 1 },
       _d: { "u-alice": 1 },
     });
-    expect(flagsForDoc(state, principal("bob"), "gone")).toEqual({
+    expect(flagsForDoc(state, principal("alice"), "gone")).toEqual({
       _r: true,
       _w: true,
+      _d: true,
+    });
+    expect(flagsForDoc(state, principal("bob"), "gone")).toEqual({
+      _r: true,
+      _w: false,
       _d: false,
     });
     expect(flagsForDoc(state, principal("carol"), "gone")).toEqual({
       _r: false,
-      _w: true,
+      _w: false,
       _d: false,
     });
   });
