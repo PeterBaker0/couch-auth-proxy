@@ -584,18 +584,31 @@ describe("PouchDB memory sync + ACL", () => {
     });
 
     it("dbacl overlay grants extra read on pull", async () => {
-      // Overlay: writers role can read everything
-      const get = await fetch(`${PROXY}/${DB}/_design/acl`, { headers: adminHeaders() });
-      expect(get.status).toBe(200);
-      const ddoc = (await get.json()) as Record<string, unknown> & { _rev: string };
-      const prevDbacl = ddoc.dbacl;
-      ddoc.dbacl = { _r: ["r-writers"], _w: [], _d: [] };
-      const put = await fetch(`${PROXY}/${DB}/_design/acl`, {
-        method: "PUT",
-        headers: { ...adminHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify(ddoc),
-      });
-      expect(put.ok).toBe(true);
+      // Overlay: writers role can read everything.
+      // Retry on 409 — ACL follower / auto-install may bump `_design/acl` rev.
+      let prevDbacl: unknown;
+      let putOk = false;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const get = await fetch(`${PROXY}/${DB}/_design/acl`, { headers: adminHeaders() });
+        expect(get.status).toBe(200);
+        const ddoc = (await get.json()) as Record<string, unknown> & { _rev: string };
+        prevDbacl = ddoc.dbacl;
+        ddoc.dbacl = { _r: ["r-writers"], _w: [], _d: [] };
+        const put = await fetch(`${PROXY}/${DB}/_design/acl`, {
+          method: "PUT",
+          headers: { ...adminHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify(ddoc),
+        });
+        if (put.ok) {
+          putOk = true;
+          break;
+        }
+        if (put.status !== 409) {
+          throw new Error(`dbacl put: ${put.status} ${await put.text()}`);
+        }
+        await sleep(100);
+      }
+      expect(putOk).toBe(true);
 
       try {
         await waitForReadable(DB, ids.alicePrivate, authHeaders("jwt", bobJwt));
@@ -605,15 +618,19 @@ describe("PouchDB memory sync + ACL", () => {
         const have = await idsInLocal(local);
         expect(have.has(ids.alicePrivate)).toBe(true);
       } finally {
-        const again = await fetch(`${PROXY}/${DB}/_design/acl`, { headers: adminHeaders() });
-        const cur = (await again.json()) as Record<string, unknown>;
-        if (prevDbacl === undefined) delete cur.dbacl;
-        else cur.dbacl = prevDbacl;
-        await fetch(`${PROXY}/${DB}/_design/acl`, {
-          method: "PUT",
-          headers: { ...adminHeaders(), "Content-Type": "application/json" },
-          body: JSON.stringify(cur),
-        });
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const again = await fetch(`${PROXY}/${DB}/_design/acl`, { headers: adminHeaders() });
+          const cur = (await again.json()) as Record<string, unknown>;
+          if (prevDbacl === undefined) delete cur.dbacl;
+          else cur.dbacl = prevDbacl;
+          const restore = await fetch(`${PROXY}/${DB}/_design/acl`, {
+            method: "PUT",
+            headers: { ...adminHeaders(), "Content-Type": "application/json" },
+            body: JSON.stringify(cur),
+          });
+          if (restore.ok || restore.status !== 409) break;
+          await sleep(100);
+        }
       }
     });
   });
