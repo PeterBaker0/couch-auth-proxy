@@ -3,11 +3,13 @@
  *
  * Assigns / echoes `X-Request-Id`, then logs method, path, status, duration,
  * and principal identity after the handler completes. Secrets are redacted by
- * the logger's field sanitizer.
+ * the logger's field sanitizer. When `PROFILE=true`, also records phase ms
+ * into the process aggregator and access-log fields.
  */
 import { createMiddleware } from "hono/factory";
 import type { AppEnv } from "./context.js";
 import { createLogger, isLevelEnabled, requestId } from "../util/log.js";
+import { PROFILE_PHASES } from "../util/profile.js";
 
 const log = createLogger("http");
 
@@ -26,13 +28,14 @@ export function requestLog() {
       });
     }
     await next();
+    const durationMs = Date.now() - start;
     const principal = c.get("principal");
     const fields: Record<string, unknown> = {
       requestId: id,
       method: c.req.method,
       path: c.req.path,
       status: c.res.status,
-      durationMs: Date.now() - start,
+      durationMs,
       user: principal?.name ?? null,
       auth: principal?.authenticatedBy ?? null,
     };
@@ -41,6 +44,19 @@ export function requestLog() {
       fields.roles = principal.roles;
       fields.aclTokens = principal.aclTokens;
     }
+
+    const requestProfile = c.get("requestProfile");
+    if (requestProfile) {
+      // Skip probe noise so load-harness scrapes stay focused on app traffic.
+      if (!c.req.path.startsWith("/_couch-auth-proxy/")) {
+        c.get("profileAggregator")?.record(requestProfile, durationMs);
+      }
+      for (const phase of PROFILE_PHASES) {
+        const ms = requestProfile.phases[phase];
+        if (ms > 0) fields[`${phase}Ms`] = Math.round(ms * 1000) / 1000;
+      }
+    }
+
     const status = c.res.status;
     if (status >= 500) log.error("request", fields);
     else if (status >= 400) log.warn("request", fields);

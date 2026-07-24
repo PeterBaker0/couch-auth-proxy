@@ -23,6 +23,7 @@ async function boot() {
     preloadDbs: config.couch.preloadDbs,
     aclAutoInstall: config.couch.aclAutoInstall,
     resolveViaCouchSession: config.auth.resolveViaCouchSession,
+    profile: config.server.profile,
   });
 
   if (config.couch.preloadDbs.length) {

@@ -38,6 +38,12 @@ const ConfigSchema = z
        * 0 = ignore X-Forwarded-For / X-Real-IP (recommended unless behind a known proxy).
        */
       trustProxyHops: z.coerce.number().int().nonnegative().default(0),
+      /**
+       * Opt-in request phase profiling (auth / ACL / upstream / filter).
+       * Exposes `/_couch-auth-proxy/profile` and adds phase ms to access logs.
+       * Intended for load harness / local debugging — leave off in production.
+       */
+      profile: boolFromEnv.default(false),
     }),
     couch: z.object({
       /** Public Couch URL used for proxying client requests (no credentials). */
@@ -194,6 +200,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       maxBodyBytes: env.MAX_BODY_BYTES ?? 50 * 1024 * 1024,
       shutdownTimeoutMs: env.SHUTDOWN_TIMEOUT_MS ?? 10_000,
       trustProxyHops: env.TRUST_PROXY_HOPS ?? 0,
+      profile: env.PROFILE ?? false,
     },
     couch: {
       url: couchUrl,

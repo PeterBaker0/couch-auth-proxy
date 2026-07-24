@@ -10,6 +10,7 @@
  */
 import type { Principal } from "../auth/types.js";
 import { createLogger, isLevelEnabled } from "../util/log.js";
+import { profileAsync } from "../util/profile.js";
 import type { AclCache, DbAclState } from "./cache.js";
 import { resolveDocAcl } from "./resolve.js";
 import type { AclFlags } from "./types.js";
@@ -23,6 +24,9 @@ const log = createLogger("acl-lookup");
  * - `noacl` DB → full access (Couch `_security` only)
  * - `_design/*` → deny all (design docs must be known before access)
  * - other ids → write allowed (create path); read/delete denied until cached
+ *
+ * Sync ACL CPU during list filtering is attributed to the `filter` phase
+ * (see actors) rather than wrapping every `flagsForDoc` call.
  */
 export function flagsForDoc(state: DbAclState, principal: Principal, docId: string): AclFlags {
   const verbose = isLevelEnabled("verbose");
@@ -116,7 +120,7 @@ export async function ensureDocRow(
     if (isLevelEnabled("verbose")) {
       log.verbose("ensureDocRow refresh", { db: state.name, docId, reason: "missing-row" });
     }
-    await cache.refreshDoc(state.name, docId);
+    await profileAsync("aclMiss", () => cache.refreshDoc(state.name, docId));
   }
   const row = state.acl.get(docId);
   if (row?.p) {
@@ -132,7 +136,7 @@ export async function ensureDocRow(
           childId: docId,
         });
       }
-      await cache.refreshDoc(state.name, row.p);
+      await profileAsync("aclMiss", () => cache.refreshDoc(state.name, row.p));
     }
   }
 }

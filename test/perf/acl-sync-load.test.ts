@@ -25,6 +25,11 @@
  *   PERF_MIN_OPS_PER_SEC  soft floor for overall ops/sec (default 20)
  *   PERF_RESULTS_PATH     write JSON report (default test/perf/last-results.json)
  *   COUCH_DIRECT_URL      direct Couch for overhead compare (default http://127.0.0.1:5985)
+ *
+ * Profiling (optional — proxy must be started with PROFILE=true):
+ *   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.profile.yml up -d --build
+ *   pnpm test:perf:profile
+ * When available, each phase scrapes `/_couch-auth-proxy/profile` (auth/acl/aclMiss/upstream/filter).
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -51,6 +56,7 @@ import {
   timed,
   type RateReport,
 } from "./metrics.js";
+import { measureServerProfile, profileEndpointAvailable, type ProfileSnapshot } from "./profile.js";
 
 PouchDB.plugin(memoryAdapter);
 
@@ -81,6 +87,8 @@ const principals: Principal[] = [];
 const remotes: PouchDB.Database[] = [];
 const locals: PouchDB.Database[] = [];
 const reports: Record<string, RateReport | Record<string, unknown>> = {};
+const profiles: Record<string, ProfileSnapshot> = {};
+let profilingEnabled = false;
 
 function memoryDb(name: string): PouchDB.Database {
   return new PouchDB(`mem-perf-${name}-${Math.random().toString(36).slice(2)}`, {
@@ -409,6 +417,10 @@ describe("ACL performance harness", () => {
       });
     }
     seedIds = await seedCorpus();
+    profilingEnabled = await profileEndpointAvailable();
+    if (profilingEnabled) {
+      console.log("\n(server PROFILE=true — will scrape phase timings per harness phase)\n");
+    }
     // brief settle for ACL follower under large seed
     await sleep(500);
   }, 300_000);
@@ -427,8 +439,10 @@ describe("ACL performance harness", () => {
         proxy: PROXY,
         direct: DIRECT,
         db: DB,
+        profiling: profilingEnabled,
       },
       reports,
+      profiles: profilingEnabled ? profiles : undefined,
     };
     await mkdir(path.dirname(RESULTS_PATH), { recursive: true });
     await writeFile(RESULTS_PATH, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
@@ -439,7 +453,11 @@ describe("ACL performance harness", () => {
   });
 
   it("measures concurrent PouchDB sync ops/sec under ACL", async () => {
-    const sync = await runSyncPhase();
+    let sync!: RateReport;
+    const snap = await measureServerProfile("server profile — PouchDB sync phase", async () => {
+      sync = await runSyncPhase();
+    });
+    if (snap) profiles.sync = snap;
     reports.sync = sync;
     expect(sync.errorRate).toBeLessThan(0.05);
     expect(sync.opsPerSec).toBeGreaterThan(0);
@@ -447,14 +465,22 @@ describe("ACL performance harness", () => {
   });
 
   it("measures HTTP r/w ops/sec through the proxy (ACL challenged)", async () => {
-    const http = await runHttpPhase(PROXY, seedIds, "proxy HTTP r/w (ACL)");
+    let http!: RateReport;
+    const snap = await measureServerProfile("server profile — HTTP r/w phase", async () => {
+      http = await runHttpPhase(PROXY, seedIds, "proxy HTTP r/w (ACL)");
+    });
+    if (snap) profiles.httpProxy = snap;
     reports.httpProxy = http;
     expect(http.errorRate).toBeLessThan(0.05);
     expect(http.opsPerSec).toBeGreaterThan(MIN_OPS_PER_SEC);
   });
 
   it("measures _bulk_get ACL filtering throughput", async () => {
-    const bulk = await runBulkGetPhase(seedIds);
+    let bulk!: RateReport;
+    const snap = await measureServerProfile("server profile — _bulk_get phase", async () => {
+      bulk = await runBulkGetPhase(seedIds);
+    });
+    if (snap) profiles.bulkGet = snap;
     reports.bulkGet = bulk;
     expect(bulk.errorRate).toBeLessThan(0.05);
     expect(bulk.opsPerSec).toBeGreaterThan(0);
