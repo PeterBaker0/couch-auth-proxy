@@ -73,7 +73,7 @@ export function flagsForDoc(state: DbAclState, principal: Principal, docId: stri
   }
   const parentRow = row.p ? state.acl.get(row.p) : undefined;
   // resolveDocAcl emits its own verbose trail for the row/parent/dbacl path.
-  return resolveDocAcl({
+  const flags = resolveDocAcl({
     principal,
     docId,
     row,
@@ -81,6 +81,24 @@ export function flagsForDoc(state: DbAclState, principal: Principal, docId: stri
     dbacl: state.dbacl,
     noacl: state.noacl,
   });
+  if (row.deleted) {
+    // Tombstones are retained so prior readers still see `_changes` deletions.
+    // Recreating a live winner is authorize like create; Couch's VDU still
+    // enforces creator/owners/acl rules against the deleted revision.
+    const recreate = { _r: flags._r, _w: true, _d: false };
+    if (verbose) {
+      log.verbose("flagsForDoc", {
+        db: state.name,
+        docId,
+        user: principal.name,
+        reason: "deleted-tombstone-recreate",
+        flags: recreate,
+        retainedRead: flags._r,
+      });
+    }
+    return recreate;
+  }
+  return flags;
 }
 
 /** True if the principal may read `docId`. */

@@ -552,6 +552,50 @@ describe("authoritative write refresh", () => {
     expect(child.status).toBe(404);
     expect(upstream).toHaveBeenCalledOnce();
   });
+
+  it("allows recreating a deleted document id after a deny-tombstone refresh", async () => {
+    const alice = buildPrincipal({
+      ok: true,
+      userCtx: { name: "alice", roles: ["readers"] },
+      info: { authenticated: "jwt" },
+    });
+    const state = stateWith([{ _id: "gone", creator: "alice", acl: ["u-bob"] }]);
+    const { app, services } = appWithState(state, 200, alice);
+    services.aclCache.refreshDoc = vi.fn(async () => {
+      // Simulate failed pre-delete recovery: empty deny row replaces grants.
+      state.acl.set("gone", {
+        s: "2-deleted",
+        p: "",
+        deleted: true,
+        _r: {},
+        _w: {},
+        _d: {},
+      });
+    });
+    const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "DELETE") return new Response('{"ok":true}', { status: 200 });
+      return new Response('{"ok":true}', { status: 201 });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const deleted = await app.request("http://localhost/docs/gone", { method: "DELETE" });
+    expect(deleted.status).toBe(200);
+    // Retained pre-delete grants win over the empty deny reconstruction.
+    expect(state.acl.get("gone")).toMatchObject({
+      deleted: true,
+      _r: { "u-alice": 1, "u-bob": 1 },
+      _w: { "u-alice": 1 },
+    });
+
+    const recreated = await app.request("http://localhost/docs/gone", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ _id: "gone", creator: "alice", acl: ["u-bob"], body: "back" }),
+    });
+    expect(recreated.status).toBe(201);
+    expect(upstream).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("COPY destination authorization", () => {

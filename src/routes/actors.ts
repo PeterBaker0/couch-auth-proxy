@@ -135,9 +135,26 @@ async function refreshWrittenDoc(
     // accurate, and subsequent ACL requests fail closed until reload.
     return;
   }
-  if (!state.acl.has(id) && retained && (deleting || retained.deleted)) {
-    state.acl.set(id, { ...retained, deleted: true });
+  if (!(deleting || retained?.deleted)) return;
+
+  const after = state.acl.get(id);
+  if (!after) {
+    if (retained) state.acl.set(id, { ...retained, deleted: true });
+    return;
   }
+
+  // Prefer previously cached grants when recovery produced an empty deny row.
+  // Otherwise a cold/failed pre-delete reconstruction would block tombstone
+  // visibility and confuse recreate authorization.
+  const afterEmpty =
+    Object.keys(after._r).length === 0 &&
+    Object.keys(after._w).length === 0 &&
+    Object.keys(after._d).length === 0;
+  if (retained && afterEmpty) {
+    state.acl.set(id, { ...retained, deleted: true });
+    return;
+  }
+  if (!after.deleted) state.acl.set(id, { ...after, deleted: true });
 }
 
 /**
