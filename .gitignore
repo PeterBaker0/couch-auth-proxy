@@ -8,5 +8,6 @@ coverage/
 .turbo
 .vitest/
 .pnpm-store/
+test/perf/last-results.json
 package-lock.json
 npm-debug.log*
