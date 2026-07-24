@@ -5,6 +5,7 @@
  */
 import { SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { waitUntil } from "./helpers.js";
 
 const PROXY = process.env.COUCH_AUTH_PROXY_URL ?? "http://127.0.0.1:8000";
 const SECRET = process.env.JWT_HMAC_SECRET ?? "couch-auth-proxy-dev-secret";
@@ -310,12 +311,17 @@ describe("integration ACL", () => {
   it("COPY requires source read and destination write", async () => {
     const src = `copy-src-${suffix}`;
     const dst = `copy-dst-${suffix}`;
-    await putDoc(
+    const put = await putDoc(
       src,
       { creator: "alice", acl: ["u-bob"], body: "copy-me" },
       authHeaders("jwt", aliceJwt),
     );
-    await new Promise((r) => setTimeout(r, 500));
+    expect(put.ok).toBe(true);
+    await waitUntil(
+      `copy source readable ${src}`,
+      async () => (await getDoc(src, authHeaders("jwt", aliceJwt))).status === 200,
+      15_000,
+    );
 
     const denied = await fetch(`${PROXY}/${DB}/${src}`, {
       method: "COPY",
@@ -333,10 +339,13 @@ describe("integration ACL", () => {
         Destination: dst,
       },
     });
-    expect(ok.ok).toBe(true);
-    await new Promise((r) => setTimeout(r, 500));
-    const bobDst = await getDoc(dst, authHeaders("jwt", bobJwt));
-    expect(bobDst.status).toBe(200);
+    expect(ok.status, await ok.text()).toBeLessThan(300);
+
+    await waitUntil(
+      `copy destination readable by bob ${dst}`,
+      async () => (await getDoc(dst, authHeaders("jwt", bobJwt))).status === 200,
+      15_000,
+    );
   });
 
   it("view rows strip unauthorized docs", async () => {
