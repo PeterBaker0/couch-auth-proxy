@@ -8,7 +8,7 @@
  */
 import type { Principal } from "../auth/types.js";
 import type { DbAclState } from "../acl/cache.js";
-import { canDelete, canRead, canWrite } from "../acl/lookup.js";
+import { canDelete, canWrite, flagsForDoc } from "../acl/lookup.js";
 import { createLogger, isLevelEnabled } from "../util/log.js";
 
 const log = createLogger("filter-bulk");
@@ -250,12 +250,10 @@ export function filterRevsObject(
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [id, val] of Object.entries(body)) {
-    if (
-      isValidId(id) &&
-      (canRead(state, principal, id) ||
-        canWrite(state, principal, id) ||
-        canDelete(state, principal, id))
-    ) {
+    if (!isValidId(id)) continue;
+    // One resolve covers read/write/delete — push probes need any of the three.
+    const flags = flagsForDoc(state, principal, id);
+    if (flags._r || flags._w || flags._d) {
       out[id] = val;
     }
   }

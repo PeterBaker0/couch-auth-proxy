@@ -25,6 +25,12 @@ const log = createLogger("session");
  */
 export class SessionResolver {
   private readonly cache: LruMap<CacheEntry>;
+  /**
+   * In-flight `/_session` lookups keyed by credential hash. Concurrent requests
+   * with the same Authorization/Cookie share one upstream round-trip without
+   * introducing a TTL-based revocation window.
+   */
+  private readonly inflight = new Map<string, Promise<Principal>>();
 
   constructor(private readonly config: AppConfig) {
     this.cache = new LruMap(config.couch.sessionCacheMaxEntries);
@@ -91,6 +97,30 @@ export class SessionResolver {
       return cached.principal;
     }
 
+    const pending = this.inflight.get(cacheKey);
+    if (pending) {
+      if (isLevelEnabled("verbose")) {
+        log.verbose("resolve", {
+          reason: "inflight-coalesce",
+          cacheKeyPrefix: cacheKey.slice(0, 8),
+        });
+      }
+      return pending;
+    }
+
+    const lookup = this.resolveCouchSession(auth, cookie, cacheKey).finally(() => {
+      this.inflight.delete(cacheKey);
+    });
+    this.inflight.set(cacheKey, lookup);
+    return lookup;
+  }
+
+  /** One Couch `/_session` fetch + optional TTL cache store. */
+  private async resolveCouchSession(
+    auth: string,
+    cookie: string,
+    cacheKey: string,
+  ): Promise<Principal> {
     const upstream = new Headers({ Accept: "application/json" });
     if (auth) upstream.set("Authorization", auth);
     if (cookie) upstream.set("Cookie", cookie);

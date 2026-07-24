@@ -207,20 +207,47 @@ export async function fetchAclRow(
   db: string,
   docId: string,
 ): Promise<FetchAclRowResult> {
+  const batch = await fetchAclRows(admin, db, [docId]);
+  if (!batch.ok) return { ok: false, status: batch.status };
+  return { ok: true, row: batch.rows.get(docId) };
+}
+
+/** Result of a multi-key ACL view fetch — fail closed on HTTP/view errors. */
+export type FetchAclRowsResult =
+  | { ok: true; rows: Map<string, AclRow | undefined> }
+  | { ok: false; status: number };
+
+/**
+ * Reload many ACL rows in one view POST (`keys: [...]`).
+ * Missing / errored keys map to `undefined` (caller reconciles); transport
+ * failures return `{ ok: false }` so caches never treat them as "no ACL".
+ */
+export async function fetchAclRows(
+  admin: AdminClient,
+  db: string,
+  docIds: string[],
+): Promise<FetchAclRowsResult> {
+  const rows = new Map<string, AclRow | undefined>();
+  if (docIds.length === 0) return { ok: true, rows };
+
   const res = await admin.json<{
-    rows: Array<{ key: string; value?: AclRow; error?: string }>;
+    rows: Array<{ key?: string; value?: AclRow; error?: string }>;
   }>(`/${encodeURIComponent(db)}/_design/acl/_view/acl`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ keys: [docId] }),
+    body: JSON.stringify({ keys: docIds }),
     query: { reduce: "false" },
   });
   if (!res.ok) return { ok: false, status: res.status };
-  const row = res.body.rows?.[0];
-  if (!row || row.error || row.value == null) {
-    return { ok: true, row: undefined };
+
+  // Couch returns one row per requested key in request order.
+  const bodyRows = res.body.rows ?? [];
+  for (let i = 0; i < docIds.length; i++) {
+    const id = docIds[i]!;
+    const row = bodyRows[i];
+    rows.set(id, !row || row.error || row.value == null ? undefined : row.value);
   }
-  return { ok: true, row: row.value };
+  return { ok: true, rows };
 }
 
 /** Opaque `update_seq` from DB info (starting point for follower catch-up). */

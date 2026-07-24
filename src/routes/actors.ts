@@ -11,16 +11,12 @@
  */
 import type { Context, Next } from "hono";
 import type { AppEnv } from "../middleware/context.js";
-import {
-  AclUnavailableError,
-  DbMissingError,
-  type AclCache,
-  type DbAclState,
-} from "../acl/cache.js";
+import { AclUnavailableError, DbMissingError, type DbAclState } from "../acl/cache.js";
 import { isDbAllowedByPolicy } from "../acl/envAccessPolicy.js";
 import { isDatabaseName, isDocumentId } from "../acl/names.js";
 import { dbAccessLevel, methodAllowed } from "../acl/restrict.js";
-import { canDelete, canRead, ensureDocRow, flagsForDoc } from "../acl/lookup.js";
+import { canDelete, canRead, ensureDocRow, ensureDocRows, flagsForDoc } from "../acl/lookup.js";
+import { aclRowFromDoc } from "../acl/resolve.js";
 import {
   couchError,
   fetchFromCouch,
@@ -48,7 +44,6 @@ import { createLogger, isLevelEnabled } from "../util/log.js";
 import { profileAsync, profileSync } from "../util/profile.js";
 
 type AppContext = Context<AppEnv>;
-const ACL_LOOKUP_CONCURRENCY = 16;
 const DESIGN_API_ATTACHMENT =
   /^_(?:view|list|show|update|search|search_info|nouveau|nouveau_info|rewrite|info)(?:\/|$)/;
 const log = createLogger("actors");
@@ -97,50 +92,24 @@ function validDocumentId(c: AppContext, id: string): boolean {
   return isDocumentId(id, c.get("config").couch.maxIdLength);
 }
 
-/** Refresh unique ACL ids with bounded Couch admin-request fan-out. */
-async function ensureDocRows(
-  cache: AclCache,
-  state: DbAclState,
-  ids: Iterable<string>,
-): Promise<void> {
-  const pending = [...new Set(ids)];
-  let index = 0;
-  const workers = Array.from(
-    { length: Math.min(ACL_LOOKUP_CONCURRENCY, pending.length) },
-    async () => {
-      while (index < pending.length) {
-        const id = pending[index++]!;
-        await ensureDocRow(cache, state, id);
-      }
-    },
-  );
-  await Promise.all(workers);
-}
-
 /**
- * Refresh an accepted write from Couch's authoritative ACL view. Submitted
- * bodies are not authoritative for `new_edits:false`, conflicts, or custom
- * ACL maps. Preserve the prior row only when a winning delete removes it.
+ * Apply tombstone retention after a delete/refresh when the view omits the doc.
+ * Prefer previously cached grants over an empty recovered deny row.
  */
-async function refreshWrittenDoc(
-  c: AppContext,
+function retainTombstoneAfterRefresh(
   state: DbAclState,
   id: string,
+  retained: ReturnType<DbAclState["acl"]["get"]>,
   deleting: boolean,
-): Promise<void> {
-  const retained = state.acl.get(id);
-  try {
-    await c.get("aclCache").refreshDoc(state.name, id);
-  } catch {
-    // The cache marks itself unavailable; the committed Couch response remains
-    // accurate, and subsequent ACL requests fail closed until reload.
-    return;
-  }
+): void {
   if (!(deleting || retained?.deleted)) return;
 
   const after = state.acl.get(id);
   if (!after) {
-    if (retained) state.acl.set(id, { ...retained, deleted: true });
+    if (retained) {
+      state.acl.set(id, { ...retained, deleted: true });
+      (state.tombstones ??= new Set()).add(id);
+    }
     return;
   }
 
@@ -153,9 +122,119 @@ async function refreshWrittenDoc(
     Object.keys(after._d).length === 0;
   if (retained && afterEmpty) {
     state.acl.set(id, { ...retained, deleted: true });
+    (state.tombstones ??= new Set()).add(id);
     return;
   }
-  if (!after.deleted) state.acl.set(id, { ...after, deleted: true });
+  if (!after.deleted) {
+    state.acl.set(id, { ...after, deleted: true });
+    (state.tombstones ??= new Set()).add(id);
+  }
+}
+
+/**
+ * For the shipped generated ACL map, a successful JSON write's body matches the
+ * view emit — apply it locally and skip an admin round-trip. Still refresh from
+ * the view for `new_edits:false`, custom maps, deletes without a retained row,
+ * or when no body was buffered (COPY / admin passthrough).
+ */
+function tryOptimisticWriteAcl(
+  state: DbAclState,
+  id: string,
+  doc: Record<string, unknown> | undefined,
+  deleting: boolean,
+  newEditsFalse: boolean,
+): boolean {
+  if (!state.generatedAclMap || newEditsFalse) return false;
+  if (deleting) {
+    const retained = state.acl.get(id);
+    if (!retained) return false;
+    state.acl.set(id, { ...retained, deleted: true });
+    (state.tombstones ??= new Set()).add(id);
+    return true;
+  }
+  if (!doc || typeof doc !== "object") return false;
+  const rev = typeof doc._rev === "string" ? doc._rev : undefined;
+  state.acl.set(
+    id,
+    aclRowFromDoc({
+      _id: id,
+      ...(rev ? { _rev: rev } : {}),
+      ...(Object.hasOwn(doc, "creator") ? { creator: doc.creator } : {}),
+      ...(Object.hasOwn(doc, "owners") ? { owners: doc.owners } : {}),
+      ...(Object.hasOwn(doc, "acl") ? { acl: doc.acl } : {}),
+      ...(Object.hasOwn(doc, "parent") ? { parent: doc.parent } : {}),
+    }),
+  );
+  state.tombstones?.delete(id);
+  return true;
+}
+
+/**
+ * Refresh an accepted write from Couch's authoritative ACL view. Submitted
+ * bodies are not authoritative for `new_edits:false`, conflicts, or custom
+ * ACL maps. Preserve the prior row only when a winning delete removes it.
+ */
+async function refreshWrittenDoc(
+  c: AppContext,
+  state: DbAclState,
+  id: string,
+  deleting: boolean,
+  options?: {
+    doc?: Record<string, unknown>;
+    newEditsFalse?: boolean;
+  },
+): Promise<void> {
+  if (tryOptimisticWriteAcl(state, id, options?.doc, deleting, options?.newEditsFalse === true)) {
+    return;
+  }
+  const retained = state.acl.get(id);
+  try {
+    await c.get("aclCache").refreshDoc(state.name, id);
+  } catch {
+    // The cache marks itself unavailable; the committed Couch response remains
+    // accurate, and subsequent ACL requests fail closed until reload.
+    return;
+  }
+  retainTombstoneAfterRefresh(state, id, retained, deleting);
+}
+
+/** Batched post-write refresh for `_bulk_docs` (one multi-key view POST). */
+async function refreshWrittenDocs(
+  c: AppContext,
+  state: DbAclState,
+  writes: Array<{ id: string; deleting: boolean; doc?: Record<string, unknown> }>,
+  newEditsFalse: boolean,
+): Promise<void> {
+  if (writes.length === 0) return;
+
+  const needRefresh: Array<{
+    id: string;
+    deleting: boolean;
+    retained: ReturnType<DbAclState["acl"]["get"]>;
+  }> = [];
+  for (const write of writes) {
+    if (tryOptimisticWriteAcl(state, write.id, write.doc, write.deleting, newEditsFalse)) {
+      continue;
+    }
+    needRefresh.push({
+      id: write.id,
+      deleting: write.deleting,
+      retained: state.acl.get(write.id),
+    });
+  }
+  if (needRefresh.length === 0) return;
+
+  try {
+    await c.get("aclCache").refreshDocs(
+      state.name,
+      needRefresh.map((w) => w.id),
+    );
+  } catch {
+    return;
+  }
+  for (const write of needRefresh) {
+    retainTombstoneAfterRefresh(state, write.id, write.retained, write.deleting);
+  }
 }
 
 /**
@@ -435,9 +514,11 @@ export const actors: Record<string, Actor> = {
 
     let id = docIdFromParams(c);
     let bufferedBody: string | undefined;
+    let parsedDoc: Record<string, unknown> | undefined;
     let deleting = false;
     let bodyParseFailed = false;
     const principal = c.get("principal");
+    const newEditsFalse = c.req.query("new_edits") === "false";
 
     // Direct JSON document writes can carry a tombstone. Attachments are
     // arbitrary bytes and use the route method for delete authorization.
@@ -461,6 +542,7 @@ export const actors: Record<string, Actor> = {
           _deleted?: unknown;
         } | null;
         if (parsed && typeof parsed === "object") {
+          parsedDoc = parsed as Record<string, unknown>;
           if (!id && typeof parsed._id === "string" && parsed._id) {
             id = parsed._id;
           }
@@ -523,7 +605,10 @@ export const actors: Record<string, Actor> = {
         },
       });
       if (upstream.ok && id) {
-        await refreshWrittenDoc(c, state, id, deleting);
+        await refreshWrittenDoc(c, state, id, deleting, {
+          doc: parsedDoc,
+          newEditsFalse,
+        });
       }
       return toClientResponse(upstream, {
         rewriteLocation: {
@@ -992,15 +1077,20 @@ export const actors: Record<string, Actor> = {
     if (!upstream.ok) return toClientResponse(upstream);
     let results = (await upstream.json()) as Array<Record<string, unknown>>;
     if (!Array.isArray(results)) results = [];
-    results = normalizeBulkResults(filtered.allowed, results, String(body.new_edits) === "false");
+    const newEditsFalse = String(body.new_edits) === "false";
+    results = normalizeBulkResults(filtered.allowed, results, newEditsFalse);
     const writtenIds = new Set<string>();
-    const refreshes: Array<Promise<void>> = [];
+    const writes: Array<{ id: string; deleting: boolean; doc?: Record<string, unknown> }> = [];
     for (const doc of filtered.allowed) {
       if (typeof doc._id !== "string" || writtenIds.has(doc._id)) continue;
       writtenIds.add(doc._id);
-      refreshes.push(refreshWrittenDoc(c, state, doc._id, doc._deleted === true));
+      writes.push({
+        id: doc._id,
+        deleting: doc._deleted === true,
+        doc: doc as Record<string, unknown>,
+      });
     }
-    await Promise.all(refreshes);
+    await refreshWrittenDocs(c, state, writes, newEditsFalse);
     return toClientResponse(upstream, {
       body: JSON.stringify(mergeBulkResults(filtered.slots, results)),
     });

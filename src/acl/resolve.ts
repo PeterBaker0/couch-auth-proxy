@@ -14,9 +14,27 @@
  */
 import type { Principal } from "../auth/types.js";
 import { createLogger, isLevelEnabled, matchingTokens } from "../util/log.js";
+import { unwindTokens } from "./restrict.js";
 import type { AclFlags, AclRow, DbAclOverlay } from "./types.js";
 
 const log = createLogger("acl-resolve");
+
+/** Precompiled `dbacl` token sets, cached by overlay object identity. */
+type CompiledDbacl = { _r: Set<string>; _w: Set<string>; _d: Set<string> };
+const compiledDbaclCache = new WeakMap<DbAclOverlay, CompiledDbacl>();
+
+function compiledDbacl(dbacl: DbAclOverlay): CompiledDbacl {
+  let compiled = compiledDbaclCache.get(dbacl);
+  if (!compiled) {
+    compiled = {
+      _r: unwindTokens(dbacl._r),
+      _w: unwindTokens(dbacl._w),
+      _d: unwindTokens(dbacl._d),
+    };
+    compiledDbaclCache.set(dbacl, compiled);
+  }
+  return compiled;
+}
 
 /**
  * Resolve r/w/d for a principal against a cached ACL row (+ optional parent + dbacl).
@@ -151,17 +169,9 @@ function applyTokens(acl: AclFlags, row: AclRow, tokens: string[]): void {
 /** OR-in matching tokens from the bucket-level `dbacl` overlay. */
 function applyDbacl(acl: AclFlags, dbacl: DbAclOverlay, tokens: string[]): void {
   // Match document/restrict semantics: bare grants are usernames, while roles
-  // must be explicitly prefixed with `r-`.
-  const asSet = (arr?: string[]) =>
-    new Set(
-      (arr ?? [])
-        .filter((token): token is string => typeof token === "string" && token.length > 0)
-        .map((token) => (/^[ru]-/.test(token) ? token : `u-${token}`)),
-    );
-  const readers = asSet(dbacl._r);
-  const writers = asSet(dbacl._w);
-  const deleters = asSet(dbacl._d);
-
+  // must be explicitly prefixed with `r-`. Sets are compiled once per overlay
+  // object so list/_changes filters do not reallocate on every doc.
+  const { _r: readers, _w: writers, _d: deleters } = compiledDbacl(dbacl);
   for (const token of tokens) {
     if (readers.has(token)) acl._r = true;
     if (writers.has(token)) acl._w = true;

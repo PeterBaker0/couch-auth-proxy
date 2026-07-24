@@ -10,7 +10,6 @@
  */
 import type { Principal } from "../auth/types.js";
 import { createLogger, isLevelEnabled } from "../util/log.js";
-import { profileAsync } from "../util/profile.js";
 import type { AclCache, DbAclState } from "./cache.js";
 import { resolveDocAcl } from "./resolve.js";
 import type { AclFlags } from "./types.js";
@@ -114,29 +113,52 @@ export async function ensureDocRow(
   state: DbAclState,
   docId: string,
 ): Promise<void> {
+  await ensureDocRows(cache, state, [docId]);
+}
+
+/**
+ * Ensure many ACL rows (and their parents) are present, using batched view
+ * fetches. Fail-closed: view/admin errors propagate as `AclUnavailableError`.
+ */
+export async function ensureDocRows(
+  cache: AclCache,
+  state: DbAclState,
+  ids: Iterable<string>,
+): Promise<void> {
   if (state.noacl) return;
-  const hadRow = state.acl.has(docId);
-  if (!hadRow) {
+  const unique = [...new Set(ids)].filter((id) => typeof id === "string" && id.length > 0);
+  if (unique.length === 0) return;
+
+  const missing = unique.filter((id) => !state.acl.has(id));
+  if (missing.length > 0) {
     if (isLevelEnabled("verbose")) {
-      log.verbose("ensureDocRow refresh", { db: state.name, docId, reason: "missing-row" });
+      log.verbose("ensureDocRows refresh", {
+        db: state.name,
+        count: missing.length,
+        reason: "missing-row",
+      });
     }
-    await profileAsync("aclMiss", () => cache.refreshDoc(state.name, docId));
+    await cache.ensureDocs(state.name, missing);
   }
-  const row = state.acl.get(docId);
-  if (row?.p) {
+
+  const parents = new Set<string>();
+  for (const id of unique) {
+    const row = state.acl.get(id);
+    if (!row?.p) continue;
     const parent = state.acl.get(row.p);
     // Refresh missing parents and parents still marked deleted — a recreate may
     // have cleared the tombstone in Couch while the cache lagged.
     if (!parent || parent.deleted) {
-      if (isLevelEnabled("verbose")) {
-        log.verbose("ensureDocRow refresh", {
-          db: state.name,
-          docId: row.p,
-          reason: parent?.deleted ? "deleted-parent" : "missing-parent",
-          childId: docId,
-        });
-      }
-      await profileAsync("aclMiss", () => cache.refreshDoc(state.name, row.p));
+      parents.add(row.p);
     }
   }
+  if (parents.size === 0) return;
+  if (isLevelEnabled("verbose")) {
+    log.verbose("ensureDocRows refresh", {
+      db: state.name,
+      count: parents.size,
+      reason: "missing-or-deleted-parent",
+    });
+  }
+  await cache.ensureDocs(state.name, [...parents]);
 }

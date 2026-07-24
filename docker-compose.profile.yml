@@ -6,6 +6,8 @@ services:
   couch-auth-proxy:
     environment:
       PROFILE: "true"
-      # Optional: cut /_session chatter while attributing ACL vs upstream.
-      # SESSION_CACHE_TTL_MS: "60000"
+      # Optional: cut sequential /_session chatter while attributing ACL vs upstream.
+      # Concurrent identical credentials already coalesce with TTL=0 (no revocation delay).
+      # Enabling a TTL accepts role/admin revocation lag up to that window — see README.
+      # SESSION_CACHE_TTL_MS: "5000"
       # SESSION_CACHE_MAX: "1000"
