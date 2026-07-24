@@ -20,6 +20,7 @@ import { bodyLimit } from "./middleware/bodyLimit.js";
 import { registerRoutes } from "./routes/register.js";
 import { jsonResponse } from "./proxy/forward.js";
 import { createLogger } from "./util/log.js";
+import { ProfileAggregator } from "./util/profile.js";
 
 const log = createLogger("app");
 
@@ -29,6 +30,8 @@ export type AppServices = {
   sessions: SessionResolver;
   aclCache: AclCache;
   accessPolicy: CompiledAccessPolicy;
+  /** Present only when `PROFILE=true`. */
+  profileAggregator?: ProfileAggregator;
 };
 
 /** Construct session resolver + ACL cache + compiled env access policy. */
@@ -38,6 +41,7 @@ export function createServices(config: AppConfig): AppServices {
     sessions: new SessionResolver(config),
     aclCache: new AclCache(config),
     accessPolicy: compileAccessPolicy(config.access),
+    ...(config.server.profile ? { profileAggregator: new ProfileAggregator() } : {}),
   };
 }
 
@@ -52,7 +56,16 @@ export function createApp(services: AppServices): Hono<AppEnv> {
   // strict:false → `/db/` matches `/db` (PouchDB always uses trailing slash)
   const app = new Hono<AppEnv>({ strict: false });
 
-  app.use("*", withServices(services));
+  app.use(
+    "*",
+    withServices({
+      config: services.config,
+      sessions: services.sessions,
+      aclCache: services.aclCache,
+      accessPolicy: services.accessPolicy,
+      profileAggregator: services.profileAggregator,
+    }),
+  );
   app.use("*", requestLog());
   app.use("*", rateLimit());
   app.use("*", bodyLimit());
@@ -138,6 +151,28 @@ export function createApp(services: AppServices): Hono<AppEnv> {
       });
     }
     return jsonResponse({ ok: ready }, ready ? 200 : 503);
+  });
+
+  /**
+   * Scrapeable phase-timing snapshot when `PROFILE=true`.
+   * Returns 404 when profiling is off so probes stay non-sensitive by default.
+   */
+  app.get("/_couch-auth-proxy/profile", (c) => {
+    const agg = c.get("profileAggregator");
+    if (!c.get("config").server.profile || !agg) {
+      return jsonResponse({ error: "not_found", reason: "Profiling disabled" }, 404);
+    }
+    return jsonResponse(agg.snapshot());
+  });
+
+  /** Reset aggregated profile counters (load harness between phases). */
+  app.post("/_couch-auth-proxy/profile/reset", (c) => {
+    const agg = c.get("profileAggregator");
+    if (!c.get("config").server.profile || !agg) {
+      return jsonResponse({ error: "not_found", reason: "Profiling disabled" }, 404);
+    }
+    agg.reset();
+    return jsonResponse({ ok: true });
   });
 
   registerRoutes(app, services.accessPolicy);

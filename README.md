@@ -138,6 +138,7 @@ Unmapped endpoints return **404** for non-admins (default-deny). `_list`, `_show
 | `SHUTDOWN_TIMEOUT_MS`                                            | Drain timeout before force-exit                                                                                                                                                                                                                                        |
 | `PORT` / `HOST`                                                  | Listen address                                                                                                                                                                                                                                                         |
 | `LOG_LEVEL`                                                      | Minimum log level: `verbose`, `debug`, `info`, `warn`, `error` (aliases: `trace`→`verbose`, `warning`→`warn`). Default `debug` outside production, `info` in production. Use `verbose` to trace ACL allow/deny decisions (actors, resolvers, filters, session tokens). |
+| `PROFILE`                                                        | Opt-in request phase profiling (`auth` / `acl` / `aclMiss` / `upstream` / `filter`). Adds phase ms to access logs and exposes `GET/POST /_couch-auth-proxy/profile[/reset]` for the perf harness. Default off — leave disabled in production.                          |
 
 Structured JSON logs go to stdout/stderr (`ts`, `level`, `component`, `msg`, …). Secret-looking fields (`authorization`, `cookie`, `password`, `token`, `secret`, …) are redacted.
 
@@ -211,6 +212,11 @@ pnpm test:integration         # needs stack up
 # ACL performance baseline (multi-client Pouch sync + HTTP r/w ops/sec)
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 pnpm test:perf                # writes test/perf/last-results.json; not in CI
+
+# Same harness + server phase profiling (auth/acl/upstream/filter)
+pnpm test:perf:profile        # compose profile overlay + scrape /_couch-auth-proxy/profile
+# Host CPU profile (after pnpm build; Couch on :5985 via docker:up:dev):
+#   PROFILE=true pnpm start:profile   # writes CPU profiles under ./profiles/
 ```
 
 Pre-commit runs `oxfmt` on staged files via husky + lint-staged (`pnpm prepare` after install).

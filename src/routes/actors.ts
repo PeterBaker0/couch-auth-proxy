@@ -45,6 +45,7 @@ import {
   readTextLimited,
 } from "../util/limitStream.js";
 import { createLogger, isLevelEnabled } from "../util/log.js";
+import { profileAsync, profileSync } from "../util/profile.js";
 
 type AppContext = Context<AppEnv>;
 const ACL_LOOKUP_CONCURRENCY = 16;
@@ -300,7 +301,7 @@ export const actors: Record<string, Actor> = {
 
     let state;
     try {
-      state = await c.get("aclCache").requireReady(db);
+      state = await profileAsync("acl", () => c.get("aclCache").requireReady(db));
     } catch (err) {
       if (err instanceof DbMissingError) {
         // Let Couch return its native missing-db error.
@@ -855,9 +856,11 @@ export const actors: Record<string, Actor> = {
       requestBodyJson?.keys != null ||
       requestBodyJson?.key != null;
     const preserveDenied = hasKeys && !isView;
-    const filtered = filterRows(state, principal, body, {
-      preserveDenied,
-    });
+    const filtered = profileSync("filter", () =>
+      filterRows(state, principal, body, {
+        preserveDenied,
+      }),
+    );
     logDecision("rows", {
       decision: "filter",
       db: state.name,
@@ -955,7 +958,9 @@ export const actors: Record<string, Actor> = {
     );
 
     const principal = c.get("principal");
-    const filtered = filterBulkDocs(state, principal, body, (id) => validDocumentId(c, id));
+    const filtered = profileSync("filter", () =>
+      filterBulkDocs(state, principal, body, (id) => validDocumentId(c, id)),
+    );
     const atomic = String(body.all_or_nothing) === "true";
     logDecision(
       "bulk",
@@ -1052,7 +1057,7 @@ export const actors: Record<string, Actor> = {
       throw err;
     }
     const principal = c.get("principal");
-    const filtered = filterBulkGet(state, principal, body);
+    const filtered = profileSync("filter", () => filterBulkGet(state, principal, body));
     logDecision("bulkGet", {
       decision: "filter",
       db: state.name,
@@ -1088,7 +1093,9 @@ export const actors: Record<string, Actor> = {
       Object.keys(body).filter((id) => validDocumentId(c, id)),
     );
     const principal = c.get("principal");
-    const filtered = filterRevsObject(state, principal, body, (id) => validDocumentId(c, id));
+    const filtered = profileSync("filter", () =>
+      filterRevsObject(state, principal, body, (id) => validDocumentId(c, id)),
+    );
     logDecision("revs", {
       decision: "filter",
       db: state.name,
@@ -1231,7 +1238,7 @@ export const actors: Record<string, Actor> = {
       throw err;
     }
     const principal = c.get("principal");
-    const filtered = filterFindDocs(state, principal, body);
+    const filtered = profileSync("filter", () => filterFindDocs(state, principal, body));
     logDecision("find", {
       decision: "filter",
       db: state.name,

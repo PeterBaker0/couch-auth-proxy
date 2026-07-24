@@ -10,6 +10,7 @@ import type { Context } from "hono";
 import type { AppConfig } from "../config.js";
 import { BodyTooLargeError, limitBytes } from "../util/limitStream.js";
 import { createLogger, isLevelEnabled } from "../util/log.js";
+import { profileAsync } from "../util/profile.js";
 
 const log = createLogger("proxy");
 
@@ -166,7 +167,7 @@ export async function fetchFromCouch(
     });
   }
 
-  const response = await fetch(url, init);
+  const response = await profileAsync("upstream", () => fetch(url, init));
   if (isLevelEnabled("debug")) {
     log.debug("upstream response", {
       method,

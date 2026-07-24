@@ -12,6 +12,13 @@ import type { CompiledAccessPolicy } from "../acl/envAccessPolicy.js";
 import type { SessionResolver } from "../auth/session.js";
 import type { Principal } from "../auth/types.js";
 import { createLogger, isLevelEnabled } from "../util/log.js";
+import {
+  createRequestProfile,
+  profileAsync,
+  runWithProfile,
+  type ProfileAggregator,
+  type RequestProfile,
+} from "../util/profile.js";
 
 const log = createLogger("context");
 
@@ -25,6 +32,10 @@ export type AppEnv = {
     principal: Principal;
     /** Set by the `db` actor once ACL state is ready for this request. */
     dbAclState?: DbAclState;
+    /** Process-wide profile aggregator when `PROFILE=true`. */
+    profileAggregator?: ProfileAggregator;
+    /** Per-request phase bag when profiling is active. */
+    requestProfile?: RequestProfile;
   };
 };
 
@@ -34,13 +45,25 @@ export function withServices(deps: {
   sessions: SessionResolver;
   aclCache: AclCache;
   accessPolicy: CompiledAccessPolicy;
+  profileAggregator?: ProfileAggregator;
 }) {
   return createMiddleware<AppEnv>(async (c, next) => {
     c.set("config", deps.config);
     c.set("sessions", deps.sessions);
     c.set("aclCache", deps.aclCache);
     c.set("accessPolicy", deps.accessPolicy);
-    await next();
+    if (deps.profileAggregator) c.set("profileAggregator", deps.profileAggregator);
+
+    if (!deps.config.server.profile) {
+      await next();
+      return;
+    }
+
+    // Bind ALS so hot-path helpers (lookup / proxy / filter) can attribute time
+    // without threading Context through every call site.
+    const requestProfile = createRequestProfile();
+    c.set("requestProfile", requestProfile);
+    await runWithProfile(requestProfile, () => next());
   });
 }
 
@@ -48,7 +71,7 @@ export function withServices(deps: {
 export function withPrincipal() {
   return createMiddleware<AppEnv>(async (c, next) => {
     const sessions = c.get("sessions");
-    const principal = await sessions.resolve(c.req.raw.headers);
+    const principal = await profileAsync("auth", () => sessions.resolve(c.req.raw.headers));
     c.set("principal", principal);
     if (isLevelEnabled("verbose")) {
       log.verbose("principal attached", {

@@ -1,0 +1,11 @@
+# Profiling overlay: enables request phase timers on the proxy.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.profile.yml up -d --build
+#   pnpm test:perf:profile
+services:
+  couch-auth-proxy:
+    environment:
+      PROFILE: "true"
+      # Optional: cut /_session chatter while attributing ACL vs upstream.
+      # SESSION_CACHE_TTL_MS: "60000"
+      # SESSION_CACHE_MAX: "1000"
