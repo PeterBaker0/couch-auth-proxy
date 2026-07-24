@@ -147,6 +147,7 @@ export const ROUTES: RouteDef[] = [
     method: "head",
     path: "/:db/_partition/:partition/_all_docs",
     actors: ["db", "rows"],
+    features: ["partition", "all_docs"],
   },
   {
     method: "post",
@@ -170,6 +171,7 @@ export const ROUTES: RouteDef[] = [
     method: "head",
     path: "/:db/_partition/:partition/_design/:ddoc/_view/:view",
     actors: ["db", "rows"],
+    features: ["partition", "views"],
   },
   {
     method: "post",
