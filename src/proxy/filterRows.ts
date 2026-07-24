@@ -50,18 +50,26 @@ export function filterRows(
   let placeholders = 0;
   let idless = 0;
   for (const row of body.rows ?? []) {
-    const id = row.id ?? row.doc?._id;
-    if (!id) {
+    const rowId = row.id ?? row.doc?._id;
+    if (!rowId) {
       // Reduce/group aggregates (and other id-less rows) cannot be ACL-checked —
       // drop them. View actor also forces reduce=false for non-admins.
       idless += 1;
       continue;
     }
-    if (canRead(state, principal, String(id))) {
+
+    // Linked views can return a different document through value._id when
+    // include_docs=true: row.id remains the source while row.doc._id is the
+    // linked target. Both must be readable before any embedded body is exposed.
+    const embeddedId = row.doc?._id;
+    const readable =
+      canRead(state, principal, String(rowId)) &&
+      (embeddedId == null || canRead(state, principal, String(embeddedId)));
+    if (readable) {
       rows.push(row);
     } else if (preserveDenied) {
       placeholders += 1;
-      rows.push({ id: String(id), error: "not_found" });
+      rows.push({ id: String(rowId), error: "not_found" });
     } else {
       dropped += 1;
     }

@@ -435,47 +435,61 @@ export class AclCache {
       version.startsWith("2.1.") &&
       /Readers list can not be changed\./.test(validateSrc) &&
       (!/Parent can not be changed\./.test(validateSrc) || !/roleToken/.test(validateSrc));
+    const looksLikeGeneratedAclMap = /var cr = doc\.creator, acl = doc\.acl, ow = doc\.owners/.test(
+      mapSrc,
+    );
+    const needsV21FullPolicyRewrite = needsOwnerPolicyRewrite && looksLikeGeneratedAclMap;
+    const needsV22FullPolicyRewrite =
+      generatedShape &&
+      version.startsWith("2.2.") &&
+      looksLikeGeneratedAclMap &&
+      /if \(odc && odc != ndc\)/.test(validateSrc);
     const needsCreatorPolicyRewrite =
-      generatedShape && version.startsWith("2.2.") && /if \(odc && odc != ndc\)/.test(validateSrc);
+      generatedShape &&
+      version.startsWith("2.2.") &&
+      !looksLikeGeneratedAclMap &&
+      /if \(odc && odc != ndc\)/.test(validateSrc);
     if (
       !needsLegacyRewrite &&
       !needsOwnerPolicyRewrite &&
       !needsCreatorPolicyRewrite &&
+      !needsV22FullPolicyRewrite &&
       !needsGlobalViewOption
     ) {
       return;
     }
 
     const generated = buildAclDesignDoc();
-    const next = needsLegacyRewrite
-      ? {
-          ...ddoc,
-          _id: ddoc._id ?? generated._id,
-          _rev: ddoc._rev,
-          language: generated.language,
-          options: { ...ddoc.options, ...generated.options },
-          type: generated.type,
-          version: generated.version,
-          stamp: generated.stamp,
-          views: { ...ddoc.views, acl: generated.views.acl },
-          validate_doc_update: generated.validate_doc_update,
-        }
-      : needsOwnerPolicyRewrite || needsCreatorPolicyRewrite
+    const next =
+      needsLegacyRewrite || needsV21FullPolicyRewrite || needsV22FullPolicyRewrite
         ? {
             ...ddoc,
             _id: ddoc._id ?? generated._id,
             _rev: ddoc._rev,
+            language: generated.language,
             options: { ...ddoc.options, ...generated.options },
             type: generated.type,
             version: generated.version,
             stamp: generated.stamp,
+            views: { ...ddoc.views, acl: generated.views.acl },
             validate_doc_update: generated.validate_doc_update,
           }
-        : {
-            ...ddoc,
-            options: { ...ddoc.options, partitioned: false },
-            stamp: generated.stamp,
-          };
+        : needsOwnerPolicyRewrite || needsCreatorPolicyRewrite
+          ? {
+              ...ddoc,
+              _id: ddoc._id ?? generated._id,
+              _rev: ddoc._rev,
+              options: { ...ddoc.options, ...generated.options },
+              type: generated.type,
+              version: generated.version,
+              stamp: generated.stamp,
+              validate_doc_update: generated.validate_doc_update,
+            }
+          : {
+              ...ddoc,
+              options: { ...ddoc.options, partitioned: false },
+              stamp: generated.stamp,
+            };
     const put = await this.admin.fetch(`/${encodeURIComponent(db)}/_design/acl`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -575,7 +589,7 @@ export class AclCache {
       // tombstones instead of silently dropping replication visibility.
       for (const id of tombstones) {
         const retained = state.acl.get(id);
-        if (retained && !loaded.has(id)) loaded.set(id, retained);
+        if (retained && !loaded.has(id)) loaded.set(id, { ...retained, deleted: true });
       }
     }
 
@@ -696,8 +710,11 @@ export class AclCache {
       } else if (isLevelEnabled("verbose")) {
         log.verbose("applyChange delete", { db, id, reason: "retain-cached-row", rev });
       }
+      const retained = state.acl.get(id);
+      if (retained) state.acl.set(id, { ...retained, deleted: true });
       (state.tombstones ??= new Set()).add(id);
-      // Retain last ACL grants for tombstone visibility on user _changes feeds.
+      // Retain last ACL grants for tombstone visibility on user _changes feeds,
+      // while marking the row so children cannot inherit from a deleted parent.
       return;
     }
 
@@ -784,7 +801,7 @@ export class AclCache {
         this.markUnavailable(state, message);
         throw new AclUnavailableError(message);
       }
-      state.acl.set(id, recovered ?? this.deniedTombstoneRow(rev));
+      state.acl.set(id, { ...(recovered ?? this.deniedTombstoneRow(rev)), deleted: true });
       (state.tombstones ??= new Set()).add(id);
       return;
     }
@@ -857,13 +874,13 @@ export class AclCache {
             const known =
               options.knownTombstones?.has(id) === true ? options.knownAcl?.get(id) : undefined;
             if (known) {
-              loaded.set(id, known);
+              loaded.set(id, { ...known, deleted: true });
             } else {
               const rev = change.changes?.[0]?.rev;
               const recovered = options.recoverWithGeneratedMap
                 ? await this.recoverAclFromDeletedDoc(db, id, rev)
                 : undefined;
-              loaded.set(id, recovered ?? this.deniedTombstoneRow(rev));
+              loaded.set(id, { ...(recovered ?? this.deniedTombstoneRow(rev)), deleted: true });
             }
             tombstones.add(id);
           }),
@@ -888,6 +905,7 @@ export class AclCache {
     return {
       s: rev ?? "",
       p: "",
+      deleted: true,
       _r: {},
       _w: {},
       _d: {},
@@ -917,13 +935,14 @@ export class AclCache {
       throw new Error(`Live revision unavailable: ${res.status}`);
     }
     if (!res.body._id || res.body._deleted) return undefined;
+    const doc = res.body;
     return aclRowFromDoc({
-      _id: res.body._id,
-      _rev: res.body._rev ?? rev,
-      creator: res.body.creator,
-      owners: res.body.owners,
-      acl: res.body.acl,
-      parent: res.body.parent,
+      _id: doc._id!,
+      _rev: doc._rev ?? rev,
+      ...(Object.hasOwn(doc, "creator") ? { creator: doc.creator } : {}),
+      ...(Object.hasOwn(doc, "owners") ? { owners: doc.owners } : {}),
+      ...(Object.hasOwn(doc, "acl") ? { acl: doc.acl } : {}),
+      ...(Object.hasOwn(doc, "parent") ? { parent: doc.parent } : {}),
     });
   }
 
@@ -974,13 +993,14 @@ export class AclCache {
       throw new Error(`Pre-delete revision unavailable: ${prevRes.status}`);
     }
     if (!prevRes.body._id) return undefined;
+    const doc = prevRes.body;
     return aclRowFromDoc({
-      _id: prevRes.body._id,
+      _id: doc._id!,
       _rev: prevRev,
-      creator: prevRes.body.creator,
-      owners: prevRes.body.owners,
-      acl: prevRes.body.acl,
-      parent: prevRes.body.parent,
+      ...(Object.hasOwn(doc, "creator") ? { creator: doc.creator } : {}),
+      ...(Object.hasOwn(doc, "owners") ? { owners: doc.owners } : {}),
+      ...(Object.hasOwn(doc, "acl") ? { acl: doc.acl } : {}),
+      ...(Object.hasOwn(doc, "parent") ? { parent: doc.parent } : {}),
     });
   }
 }

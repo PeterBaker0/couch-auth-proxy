@@ -82,3 +82,29 @@ describe("bearerToken", () => {
     expect(bearerToken(null)).toBeNull();
   });
 });
+
+describe("Couch session principal freshness", () => {
+  it("does not cache roles by default, so revocation is immediate", async () => {
+    const config = loadConfig({
+      COUCH_URL: "http://127.0.0.1:5984",
+      RATE_LIMIT_ENABLED: "false",
+    });
+    const responses = [
+      { ok: true, userCtx: { name: "bob", roles: ["writers"] } },
+      { ok: true, userCtx: { name: "bob", roles: [] } },
+    ];
+    const couchFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const resolver = new SessionResolver(config);
+    const headers = new Headers({ Authorization: "Basic credentials" });
+
+    expect((await resolver.resolve(headers)).roles).toEqual(["writers"]);
+    expect((await resolver.resolve(headers)).roles).toEqual([]);
+    expect(couchFetch).toHaveBeenCalledTimes(2);
+    couchFetch.mockRestore();
+  });
+});

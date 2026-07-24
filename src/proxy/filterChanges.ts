@@ -13,9 +13,6 @@ import { createLogger, isLevelEnabled } from "../util/log.js";
 
 const log = createLogger("filter-changes");
 
-/** Pause upstream reads when the incomplete line buffer exceeds this size. */
-const HIGH_WATER_BYTES = 256 * 1024;
-
 type ChangeLine = {
   id?: string;
   seq?: string | number;
@@ -49,10 +46,10 @@ export function filterChangesStream(
       feed: mode,
     });
   }
-  if (mode === "continuous" || mode === "eventsource") {
-    return filterLineFeed(upstream, state, principal, mode === "eventsource");
-  }
   const maxBytes = options?.maxBufferBytes ?? 50 * 1024 * 1024;
+  if (mode === "continuous" || mode === "eventsource") {
+    return filterLineFeed(upstream, state, principal, mode === "eventsource", maxBytes);
+  }
   return filterJsonChanges(upstream, state, principal, maxBytes);
 }
 
@@ -60,11 +57,12 @@ function normalizeFeed(feed: string): string {
   const normalized = (feed || "normal").toLowerCase();
   if (
     normalized === "continuous" ||
+    normalized === "live" ||
     normalized === "eventsource" ||
     normalized === "longpoll" ||
     normalized === "normal"
   ) {
-    return normalized;
+    return normalized === "live" ? "continuous" : normalized;
   }
   return "normal";
 }
@@ -77,6 +75,7 @@ function filterLineFeed(
   state: DbAclState,
   principal: Principal,
   eventsource: boolean,
+  maxBufferBytes: number,
 ): ReadableStream<Uint8Array> {
   const reader = upstream.getReader();
   const decoder = new TextDecoder();
@@ -101,8 +100,8 @@ function filterLineFeed(
         buffer += decoder.decode(value, { stream: true });
 
         // Bound incomplete-line buffer (malformed/huge lines).
-        if (buffer.length > HIGH_WATER_BYTES && !buffer.includes("\n")) {
-          controller.error(new BodyTooLargeError(HIGH_WATER_BYTES));
+        if (buffer.length > maxBufferBytes && !buffer.includes("\n")) {
+          controller.error(new BodyTooLargeError(maxBufferBytes));
           void reader.cancel();
           return;
         }
