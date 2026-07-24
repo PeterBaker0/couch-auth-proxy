@@ -634,7 +634,7 @@ describe("AclCache row refresh failures", () => {
         }
         return { ok: false as const, status: 404, text: "missing" };
       },
-    ) as typeof cache.adminClient.json
+    ) as typeof cache.adminClient.json;
 
     await (
       cache as unknown as {

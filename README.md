@@ -207,6 +207,10 @@ pnpm typecheck
 pnpm test                     # unit
 docker compose up -d --build
 pnpm test:integration         # needs stack up
+
+# ACL performance baseline (multi-client Pouch sync + HTTP r/w ops/sec)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+pnpm test:perf                # writes test/perf/last-results.json; not in CI
 ```
 
 Pre-commit runs `oxfmt` on staged files via husky + lint-staged (`pnpm prepare` after install).

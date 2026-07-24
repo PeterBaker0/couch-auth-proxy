@@ -19,6 +19,7 @@ This is `couch-auth-proxy`: a TypeScript (Hono) reverse proxy that enforces per-
 
 - `pnpm lint`, `pnpm fmt:check`, `pnpm typecheck`, `pnpm test` (unit) need no running services.
 - `pnpm test:integration` requires the docker stack up first (`docker compose up -d --build`); it hits the proxy at `http://127.0.0.1:8000`.
+- `pnpm test:perf` is the ACL load harness (multi-client Pouch sync + HTTP r/w ops/sec). Prefer the dev overlay so direct Couch is on `5985` for overhead compare: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build`. Not part of CI.
 
 ### Gotchas
 
