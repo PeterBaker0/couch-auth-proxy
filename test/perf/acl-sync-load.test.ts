@@ -8,6 +8,10 @@
  *
  * Primary success metric: ops/second (sync docs + HTTP r/w).
  *
+ * Note: the proxy path includes per-request Couch `/_session` auth resolution
+ * unless `SESSION_CACHE_TTL_MS` is enabled on the proxy. Direct Couch compares
+ * therefore mix auth + ACL overhead, not ACL filtering alone.
+ *
  * Prerequisites:
  *   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
  *   pnpm test:perf
@@ -221,7 +225,8 @@ async function runHttpPhase(
   const latency = new LatencyTracker();
   const t0 = performance.now();
   await Promise.all(
-    principals.slice(0, CLIENTS).map(async (p, clientIdx) => {
+    Array.from({ length: CLIENTS }, async (_, clientIdx) => {
+      const p = principals[clientIdx % principals.length]!;
       for (let i = 0; i < HTTP_OPS; i++) {
         await httpOp(baseUrl, p, seedIds, clientIdx * HTTP_OPS + i, counter, latency);
       }
@@ -235,7 +240,6 @@ async function runHttpPhase(
 async function runSyncPhase(): Promise<RateReport> {
   const counter = new OpCounter();
   const latency = new LatencyTracker();
-  const workers = Math.min(CLIENTS, principals.length);
 
   // Warm ACL path once so measured rounds are steady-state.
   {
@@ -246,8 +250,10 @@ async function runSyncPhase(): Promise<RateReport> {
   }
 
   const t0 = performance.now();
+  // Reuse the demo principal set across CLIENTS workers (same ACL identities,
+  // distinct Pouch local DBs) so concurrency scales with PERF_CLIENTS.
   await Promise.all(
-    Array.from({ length: workers }, async (_, clientIdx) => {
+    Array.from({ length: CLIENTS }, async (_, clientIdx) => {
       const principal = principals[clientIdx % principals.length]!;
       const local = trackLocal(`client-${clientIdx}`);
       const remote = trackRemote(remoteWithJwt(PROXY, DB, principal.jwt));
@@ -331,7 +337,8 @@ async function runBulkGetPhase(seedIds: string[]): Promise<RateReport> {
   const t0 = performance.now();
 
   await Promise.all(
-    principals.slice(0, CLIENTS).map(async (p) => {
+    Array.from({ length: CLIENTS }, async (_, clientIdx) => {
+      const p = principals[clientIdx % principals.length]!;
       for (let offset = 0; offset < seedIds.length; offset += chunk) {
         const docs = seedIds.slice(offset, offset + chunk).map((id) => ({ id }));
         const { value, ms } = await timed(async () => {
