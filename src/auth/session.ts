@@ -6,8 +6,10 @@
  * preferred JWT strategy — Couch validates tokens with its own keys;
  * couch-auth-proxy never forks JWT semantics.
  *
- * Results are cached briefly (LRU + TTL) keyed by a hash of credentials so
- * hot paths avoid a session round-trip on every request.
+ * Results are cached briefly (LRU + TTL, default 5000ms) keyed by a hash of
+ * credentials so hot paths avoid a session round-trip on every request.
+ * Concurrent identical lookups also coalesce in-flight. Set
+ * `SESSION_CACHE_TTL_MS=0` to re-resolve on every request.
  */
 import { createHash } from "node:crypto";
 import type { AppConfig } from "../config.js";

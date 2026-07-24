@@ -8,9 +8,10 @@
  *
  * Primary success metric: ops/second (sync docs + HTTP r/w).
  *
- * Note: the proxy path includes per-request Couch `/_session` auth resolution
- * unless `SESSION_CACHE_TTL_MS` is enabled on the proxy. Direct Couch compares
- * therefore mix auth + ACL overhead, not ACL filtering alone.
+ * Note: the proxy caches Couch `/_session` principals for
+ * `SESSION_CACHE_TTL_MS` (default 5000). Direct Couch compares therefore mix
+ * auth + ACL overhead, not ACL filtering alone. Set `SESSION_CACHE_TTL_MS=0`
+ * on the proxy to force per-request session resolution.
  *
  * Prerequisites:
  *   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
