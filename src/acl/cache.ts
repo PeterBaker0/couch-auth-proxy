@@ -245,6 +245,9 @@ export class AclCache {
    * Batch on-demand ACL refresh via one multi-key view POST per chunk.
    * Missing view rows are reconciled (batched `_all_docs`) — never treated as
    * open grants. Failures mark the DB unavailable (fail closed).
+   *
+   * Prefer this after writes / when the document is known to exist. For
+   * pre-authorization of unknown ids, use `ensureDocs` (existence-first).
    */
   async refreshDocs(db: string, docIds: readonly string[]): Promise<void> {
     const state = this.dbs.get(db);
@@ -260,6 +263,27 @@ export class AclCache {
     });
   }
 
+  /**
+   * Ensure ACL rows for unknown ids before authorization. Uses `_all_docs`
+   * first so brand-new create-path ids pay one admin round-trip instead of an
+   * empty view fetch + reconcile. Live/deleted winners still load ACL grants
+   * (view or recovery) and fail closed on indeterminate custom-map omissions.
+   */
+  async ensureDocs(db: string, docIds: readonly string[]): Promise<void> {
+    const state = this.dbs.get(db);
+    if (!state || state.noacl) return;
+    const unique = [...new Set(docIds)].filter((id) => typeof id === "string" && id.length > 0);
+    if (unique.length === 0) return;
+
+    await profileAsync("aclMiss", async () => {
+      for (let i = 0; i < unique.length; i += ACL_REFRESH_BATCH_SIZE) {
+        const chunk = unique.slice(i, i + ACL_REFRESH_BATCH_SIZE);
+        await this.ensureDocsChunk(db, state, chunk);
+      }
+    });
+  }
+
+  /** View-first refresh for ids expected to exist (post-write / follower). */
   private async refreshDocsChunk(db: string, state: DbAclState, docIds: string[]): Promise<void> {
     let result;
     try {
@@ -298,6 +322,77 @@ export class AclCache {
       log.verbose("refreshDocs", { db, reason: "reconcile-missing", count: missing.length });
     }
     await this.reconcileMissingAclRows(db, state, missing);
+  }
+
+  /** Existence-first ensure for pre-authorization of possibly-new ids. */
+  private async ensureDocsChunk(db: string, state: DbAclState, docIds: string[]): Promise<void> {
+    let meta;
+    try {
+      meta = await this.admin.json<{
+        rows?: Array<{
+          error?: string;
+          value?: { rev?: string; deleted?: boolean };
+        }>;
+      }>(`/${encodeURIComponent(db)}/_all_docs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keys: docIds }),
+      });
+    } catch (err) {
+      const message = `Document state unavailable in ${db}: ${String(err)}`;
+      this.markUnavailable(state, message);
+      throw new AclUnavailableError(message);
+    }
+    if (!meta.ok) {
+      const message = `Document state unavailable in ${db}: ${meta.status}`;
+      this.markUnavailable(state, message);
+      throw new AclUnavailableError(message);
+    }
+
+    const bodyRows = meta.body.rows ?? [];
+    const needView: string[] = [];
+    const deleted: Array<{ id: string; rev?: string }> = [];
+
+    for (let index = 0; index < docIds.length; index++) {
+      const id = docIds[index]!;
+      const row = bodyRows[index];
+      if (!row || row.error === "not_found") {
+        state.acl.delete(id);
+        state.tombstones?.delete(id);
+        if (isLevelEnabled("verbose")) {
+          log.verbose("ensureDocs", { db, docId: id, reason: "all-docs-missing" });
+        }
+        continue;
+      }
+      if (row.value?.deleted) {
+        deleted.push({ id, rev: row.value.rev });
+        continue;
+      }
+      needView.push(id);
+    }
+
+    if (needView.length > 0) {
+      // Reuse view-first refresh for live winners (and fail closed if omitted).
+      await this.refreshDocsChunk(db, state, needView);
+    }
+
+    for (const { id, rev } of deleted) {
+      let recovered: AclRow | undefined;
+      try {
+        recovered = state.generatedAclMap
+          ? await this.recoverAclFromDeletedDoc(db, id, rev)
+          : undefined;
+      } catch (err) {
+        const message = `Deleted ACL unavailable in ${db}: ${String(err)}`;
+        this.markUnavailable(state, message);
+        throw new AclUnavailableError(message);
+      }
+      state.acl.set(id, { ...(recovered ?? this.deniedTombstoneRow(rev)), deleted: true });
+      (state.tombstones ??= new Set()).add(id);
+      if (isLevelEnabled("verbose")) {
+        log.verbose("ensureDocs", { db, docId: id, reason: "deleted-tombstone", rev });
+      }
+    }
   }
 
   /**

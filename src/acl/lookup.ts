@@ -138,7 +138,7 @@ export async function ensureDocRows(
         reason: "missing-row",
       });
     }
-    await cache.refreshDocs(state.name, missing);
+    await cache.ensureDocs(state.name, missing);
   }
 
   const parents = new Set<string>();
@@ -160,5 +160,5 @@ export async function ensureDocRows(
       reason: "missing-or-deleted-parent",
     });
   }
-  await cache.refreshDocs(state.name, [...parents]);
+  await cache.ensureDocs(state.name, [...parents]);
 }

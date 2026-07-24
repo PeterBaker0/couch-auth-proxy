@@ -1,0 +1,282 @@
+{
+  "version": "1.3.1",
+  "at": "2026-07-24T08:26:52.795Z",
+  "config": {
+    "clients": 8,
+    "seedDocs": 400,
+    "rounds": 4,
+    "docsPerRound": 10,
+    "httpOps": 80,
+    "proxy": "http://127.0.0.1:8000",
+    "direct": "http://127.0.0.1:5985",
+    "db": "perfacl-mryofamr",
+    "profiling": true
+  },
+  "reports": {
+    "sync": {
+      "ops": 96,
+      "errors": 0,
+      "docsRead": 2975,
+      "docsWritten": 320,
+      "bytesIn": 0,
+      "bytesOut": 0,
+      "durationSec": 1.8800907320000002,
+      "opsPerSec": 51.06136547882306,
+      "docsReadPerSec": 1582.3704406197774,
+      "docsWrittenPerSec": 170.2045515960769,
+      "syncDocsPerSec": 1752.5749922158543,
+      "errorRate": 0,
+      "latency": {
+        "count": 96,
+        "minMs": 48.27195799999981,
+        "maxMs": 398.87658099999976,
+        "meanMs": 146.81479276041665,
+        "p50Ms": 106.13684899999998,
+        "p95Ms": 382.011988,
+        "p99Ms": 398.87658099999976
+      }
+    },
+    "httpProxy": {
+      "ops": 640,
+      "errors": 0,
+      "docsRead": 298,
+      "docsWritten": 214,
+      "bytesIn": 0,
+      "bytesOut": 0,
+      "durationSec": 1.1838249289999998,
+      "opsPerSec": 540.6204788579851,
+      "docsReadPerSec": 251.72641046824927,
+      "docsWrittenPerSec": 180.76997261813875,
+      "syncDocsPerSec": 432.496383086388,
+      "errorRate": 0,
+      "latency": {
+        "count": 640,
+        "minMs": 1.479526000000078,
+        "maxMs": 49.20803999999998,
+        "meanMs": 14.290347962500007,
+        "p50Ms": 8.957378999999491,
+        "p95Ms": 33.5303899999999,
+        "p99Ms": 39.38699699999961
+      }
+    },
+    "bulkGet": {
+      "ops": 128,
+      "errors": 0,
+      "docsRead": 2240,
+      "docsWritten": 0,
+      "bytesIn": 0,
+      "bytesOut": 0,
+      "durationSec": 0.19944600699999956,
+      "opsPerSec": 641.7777017716894,
+      "docsReadPerSec": 11231.109781004565,
+      "docsWrittenPerSec": 0,
+      "syncDocsPerSec": 11231.109781004565,
+      "errorRate": 0,
+      "latency": {
+        "count": 128,
+        "minMs": 7.104992999999922,
+        "maxMs": 20.82129900000018,
+        "meanMs": 12.014458671875083,
+        "p50Ms": 11.586906999999883,
+        "p95Ms": 17.01926100000037,
+        "p99Ms": 20.579983999999968
+      }
+    },
+    "httpDirect": {
+      "ops": 640,
+      "errors": 0,
+      "docsRead": 426,
+      "docsWritten": 214,
+      "bytesIn": 0,
+      "bytesOut": 0,
+      "durationSec": 0.4557237480000003,
+      "opsPerSec": 1404.359555122415,
+      "docsReadPerSec": 934.7768288783575,
+      "docsWrittenPerSec": 469.5827262440575,
+      "syncDocsPerSec": 1404.359555122415,
+      "errorRate": 0,
+      "latency": {
+        "count": 640,
+        "minMs": 1.0598700000000463,
+        "maxMs": 18.037640000000465,
+        "meanMs": 5.4857427937500205,
+        "p50Ms": 3.2338139999992563,
+        "p95Ms": 13.899054999999862,
+        "p99Ms": 17.620622999999796
+      }
+    },
+    "directCompare": {
+      "proxyOpsPerSec": 540.6204788579851,
+      "directOpsPerSec": 1404.359555122415,
+      "proxyOverDirectRatio": 0.38495873573549355,
+      "overheadPct": 61.50412642645065
+    },
+    "overall": {
+      "overallOps": 864,
+      "overallSec": 3.263361668,
+      "overallOpsPerSec": 264.7576603207193,
+      "syncDocsPerSec": 1852.9971897678122,
+      "phases": {
+        "syncOpsPerSec": 51.06136547882306,
+        "syncDocsPerSec": 1752.5749922158543,
+        "httpOpsPerSec": 540.6204788579851,
+        "bulkGetOpsPerSec": 641.7777017716894
+      }
+    }
+  },
+  "profiles": {
+    "sync": {
+      "enabled": true,
+      "requests": 1082,
+      "startedAt": "2026-07-24T08:26:15.316Z",
+      "updatedAt": "2026-07-24T08:26:50.933Z",
+      "meanDurationMs": 10.489833641404806,
+      "phases": {
+        "auth": {
+          "count": 1082,
+          "totalMs": 2631.732354999891,
+          "meanMs": 2.432284986136683,
+          "maxMs": 15.615420999994967,
+          "perRequestMeanMs": 2.432284986136683
+        },
+        "acl": {
+          "count": 953,
+          "totalMs": 5.298481000078027,
+          "meanMs": 0.005559791185811151,
+          "maxMs": 0.3459210000000894,
+          "perRequestMeanMs": 0.0048969325324196185
+        },
+        "aclMiss": {
+          "count": 96,
+          "totalMs": 2128.9380600000004,
+          "meanMs": 22.176438125000004,
+          "maxMs": 112.62318299998879,
+          "perRequestMeanMs": 1.9675952495378932
+        },
+        "upstream": {
+          "count": 1082,
+          "totalMs": 6254.031802000107,
+          "meanMs": 5.780066360443722,
+          "maxMs": 137.2808969999969,
+          "perRequestMeanMs": 5.780066360443722
+        },
+        "filter": {
+          "count": 171,
+          "totalMs": 5.494367000050261,
+          "meanMs": 0.032130801169884565,
+          "maxMs": 0.15339400000084424,
+          "perRequestMeanMs": 0.005077973197828337
+        }
+      },
+      "phaseShareOfMean": {
+        "auth": 0.231870692070475,
+        "acl": 0.0004668265198306632,
+        "aclMiss": 0.18757163524229079,
+        "upstream": 0.5510160177973663,
+        "filter": 0.00048408519824231377
+      }
+    },
+    "httpProxy": {
+      "enabled": true,
+      "requests": 640,
+      "startedAt": "2026-07-24T08:26:15.316Z",
+      "updatedAt": "2026-07-24T08:26:52.125Z",
+      "meanDurationMs": 11.05,
+      "phases": {
+        "auth": {
+          "count": 640,
+          "totalMs": 1318.1639300000606,
+          "meanMs": 2.0596311406250947,
+          "maxMs": 9.90415600000415,
+          "perRequestMeanMs": 2.0596311406250947
+        },
+        "acl": {
+          "count": 640,
+          "totalMs": 2.3741419998914353,
+          "meanMs": 0.0037095968748303678,
+          "maxMs": 0.612860000001092,
+          "perRequestMeanMs": 0.0037095968748303678
+        },
+        "aclMiss": {
+          "count": 214,
+          "totalMs": 2681.138827999923,
+          "meanMs": 12.528686112149172,
+          "maxMs": 30.668532999996387,
+          "perRequestMeanMs": 4.189279418749879
+        },
+        "upstream": {
+          "count": 512,
+          "totalMs": 2915.4691790000143,
+          "meanMs": 5.694275740234403,
+          "maxMs": 16.88033500000165,
+          "perRequestMeanMs": 4.555420592187522
+        },
+        "filter": {
+          "count": 0,
+          "totalMs": 0,
+          "meanMs": 0,
+          "maxMs": 0,
+          "perRequestMeanMs": 0
+        }
+      },
+      "phaseShareOfMean": {
+        "auth": 0.18639195842761036,
+        "acl": 0.0003357101244190378,
+        "aclMiss": 0.37912030938912933,
+        "upstream": 0.41225525721154044,
+        "filter": 0
+      }
+    },
+    "bulkGet": {
+      "enabled": true,
+      "requests": 128,
+      "startedAt": "2026-07-24T08:26:15.316Z",
+      "updatedAt": "2026-07-24T08:26:52.332Z",
+      "meanDurationMs": 9.1171875,
+      "phases": {
+        "auth": {
+          "count": 128,
+          "totalMs": 267.76562399999966,
+          "meanMs": 2.0919189374999974,
+          "maxMs": 4.710695999994641,
+          "perRequestMeanMs": 2.0919189374999974
+        },
+        "acl": {
+          "count": 128,
+          "totalMs": 0.310023000005458,
+          "meanMs": 0.0024220546875426407,
+          "maxMs": 0.004159000003710389,
+          "perRequestMeanMs": 0.0024220546875426407
+        },
+        "aclMiss": {
+          "count": 0,
+          "totalMs": 0,
+          "meanMs": 0,
+          "maxMs": 0,
+          "perRequestMeanMs": 0
+        },
+        "upstream": {
+          "count": 128,
+          "totalMs": 821.1339799999987,
+          "meanMs": 6.41510921874999,
+          "maxMs": 11.719489000002795,
+          "perRequestMeanMs": 6.41510921874999
+        },
+        "filter": {
+          "count": 128,
+          "totalMs": 3.3158709999988787,
+          "meanMs": 0.02590524218749124,
+          "maxMs": 0.13173799999640323,
+          "perRequestMeanMs": 0.02590524218749124
+        }
+      },
+      "phaseShareOfMean": {
+        "auth": 0.22944783547557812,
+        "acl": 0.0002656580976910523,
+        "aclMiss": 0,
+        "upstream": 0.7036280891173939,
+        "filter": 0.0028413633247633924
+      }
+    }
+  }
+}
