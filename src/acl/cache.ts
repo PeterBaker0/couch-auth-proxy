@@ -694,57 +694,22 @@ export class AclCache {
     }
 
     if (deleted) {
-      // A delayed delete notification can arrive after a recreate. Reconcile
-      // against Couch so we never stamp `deleted: true` onto a live winner.
+      // A delayed delete notification can arrive after a recreate, and the ACL
+      // view may still omit the live winner briefly. Reconcile through
+      // `_all_docs` so we never stamp `deleted: true` onto a live document.
       const retained = state.acl.get(id);
-      try {
-        const current = await fetchAclRow(this.admin, db, id);
-        if (!current.ok) {
-          const message = `ACL row refresh failed in ${db}: ${current.status}`;
-          this.markUnavailable(state, message);
-          throw new AclUnavailableError(message);
-        }
-        if (current.row) {
-          state.acl.set(id, current.row);
-          state.tombstones?.delete(id);
-          if (isLevelEnabled("verbose")) {
-            log.verbose("applyChange delete", {
-              db,
-              id,
-              reason: "stale-delete-after-recreate",
-              rev,
-            });
-          }
-          return;
-        }
-      } catch (err) {
-        if (err instanceof AclUnavailableError) throw err;
-        const message = `ACL row refresh failed in ${db}: ${String(err)}`;
-        this.markUnavailable(state, message);
-        throw new AclUnavailableError(message);
+      if (isLevelEnabled("verbose")) {
+        log.verbose("applyChange delete", { db, id, reason: "reconcile-delete", rev });
       }
-
-      if (!state.acl.has(id)) {
-        const recovered = state.generatedAclMap
-          ? await this.recoverAclFromDeletedDoc(db, id, rev)
-          : undefined;
-        state.acl.set(id, recovered ?? this.deniedTombstoneRow(rev));
-        if (isLevelEnabled("verbose")) {
-          log.verbose("applyChange delete", {
-            db,
-            id,
-            reason: recovered ? "recovered-pre-delete" : "denied-tombstone",
-            rev,
-          });
-        }
-      } else if (isLevelEnabled("verbose")) {
-        log.verbose("applyChange delete", { db, id, reason: "retain-cached-row", rev });
+      await this.reconcileMissingAclRow(db, state, id);
+      if (state.acl.get(id) && !state.acl.get(id)?.deleted && !state.tombstones?.has(id)) {
+        // Live winner confirmed (recreate won before this notification).
+        return;
       }
-      const kept = state.acl.get(id) ?? retained;
-      if (kept) state.acl.set(id, { ...kept, deleted: true });
-      (state.tombstones ??= new Set()).add(id);
-      // Retain last ACL grants for tombstone visibility on user _changes feeds,
-      // while marking the row so children cannot inherit from a deleted parent.
+      if (!state.acl.has(id) && retained) {
+        state.acl.set(id, { ...retained, deleted: true });
+        (state.tombstones ??= new Set()).add(id);
+      }
       return;
     }
 

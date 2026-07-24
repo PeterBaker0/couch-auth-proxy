@@ -119,15 +119,20 @@ export async function ensureDocRow(
     await cache.refreshDoc(state.name, docId);
   }
   const row = state.acl.get(docId);
-  if (row?.p && !state.acl.has(row.p)) {
-    if (isLevelEnabled("verbose")) {
-      log.verbose("ensureDocRow refresh", {
-        db: state.name,
-        docId: row.p,
-        reason: "missing-parent",
-        childId: docId,
-      });
+  if (row?.p) {
+    const parent = state.acl.get(row.p);
+    // Refresh missing parents and parents still marked deleted — a recreate may
+    // have cleared the tombstone in Couch while the cache lagged.
+    if (!parent || parent.deleted) {
+      if (isLevelEnabled("verbose")) {
+        log.verbose("ensureDocRow refresh", {
+          db: state.name,
+          docId: row.p,
+          reason: parent?.deleted ? "deleted-parent" : "missing-parent",
+          childId: docId,
+        });
+      }
+      await cache.refreshDoc(state.name, row.p);
     }
-    await cache.refreshDoc(state.name, row.p);
   }
 }
