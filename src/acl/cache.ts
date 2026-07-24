@@ -18,10 +18,11 @@ import type { AclRow, DbAclOverlay, RestrictMap } from "./types.js";
 import { ACL_MAP_SOURCE, buildAclDesignDoc } from "./ddoc.js";
 import { aclRowFromDoc } from "./resolve.js";
 import { AdminClient } from "../couch/adminClient.js";
-import { ChangesFollower, fetchAclRow, fetchUpdateSeq } from "./changesFollower.js";
+import { ChangesFollower, fetchAclRow, fetchAclRows, fetchUpdateSeq } from "./changesFollower.js";
 import { isSystemDatabase } from "./names.js";
 import { compileRestrict, type CompiledRestrict } from "./restrict.js";
 import { createLogger, isLevelEnabled } from "../util/log.js";
+import { profileAsync } from "../util/profile.js";
 
 type EnsureDdocResult =
   /** Database does not exist upstream */
@@ -34,6 +35,8 @@ type EnsureDdocResult =
 const log = createLogger("acl-cache");
 const ACL_VIEW_PAGE_SIZE = 2_000;
 const ACL_RECOVERY_CONCURRENCY = 16;
+/** Max keys per ACL view / `_all_docs` POST when refreshing on demand. */
+const ACL_REFRESH_BATCH_SIZE = 100;
 
 /** Mutable per-DB ACL state held in the process. */
 export type DbAclState = {
@@ -84,6 +87,8 @@ export class AclCache {
   private readonly admin: AdminClient;
   /** Coalesce concurrent `ensureDb` calls for the same name. */
   private readonly inflight = new Map<string, Promise<DbAclState>>();
+  /** Coalesce concurrent single-doc refreshes (`db\\0docId`). */
+  private readonly refreshInflight = new Map<string, Promise<void>>();
   private stopped = false;
 
   constructor(private readonly config: AppConfig) {
@@ -226,11 +231,39 @@ export class AclCache {
 
   /** On-demand ACL row refresh (opaque-seq safe; keyed by doc id). */
   async refreshDoc(db: string, docId: string): Promise<void> {
+    const key = `${db}\0${docId}`;
+    const pending = this.refreshInflight.get(key);
+    if (pending) return pending;
+    const lookup = this.refreshDocs(db, [docId]).finally(() => {
+      this.refreshInflight.delete(key);
+    });
+    this.refreshInflight.set(key, lookup);
+    return lookup;
+  }
+
+  /**
+   * Batch on-demand ACL refresh via one multi-key view POST per chunk.
+   * Missing view rows are reconciled (batched `_all_docs`) — never treated as
+   * open grants. Failures mark the DB unavailable (fail closed).
+   */
+  async refreshDocs(db: string, docIds: readonly string[]): Promise<void> {
     const state = this.dbs.get(db);
     if (!state || state.noacl) return;
+    const unique = [...new Set(docIds)].filter((id) => typeof id === "string" && id.length > 0);
+    if (unique.length === 0) return;
+
+    await profileAsync("aclMiss", async () => {
+      for (let i = 0; i < unique.length; i += ACL_REFRESH_BATCH_SIZE) {
+        const chunk = unique.slice(i, i + ACL_REFRESH_BATCH_SIZE);
+        await this.refreshDocsChunk(db, state, chunk);
+      }
+    });
+  }
+
+  private async refreshDocsChunk(db: string, state: DbAclState, docIds: string[]): Promise<void> {
     let result;
     try {
-      result = await fetchAclRow(this.admin, db, docId);
+      result = await fetchAclRows(this.admin, db, docIds);
     } catch (err) {
       const message = `ACL row unavailable in ${db}: ${String(err)}`;
       this.markUnavailable(state, message);
@@ -239,25 +272,32 @@ export class AclCache {
     if (!result.ok) {
       const message = `ACL row unavailable in ${db}: ${result.status}`;
       this.markUnavailable(state, message);
-      log.warn("refreshDoc view fetch failed; failing closed", {
+      log.warn("refreshDocs view fetch failed; failing closed", {
         db,
-        docId,
+        count: docIds.length,
         status: result.status,
       });
       throw new AclUnavailableError(message);
     }
-    if (result.row) {
-      state.acl.set(docId, result.row);
-      state.tombstones?.delete(docId);
-      if (isLevelEnabled("verbose")) {
-        log.verbose("refreshDoc", { db, docId, reason: "view-row", parent: result.row.p || "" });
+
+    const missing: string[] = [];
+    for (const docId of docIds) {
+      const row = result.rows.get(docId);
+      if (row) {
+        state.acl.set(docId, row);
+        state.tombstones?.delete(docId);
+        if (isLevelEnabled("verbose")) {
+          log.verbose("refreshDoc", { db, docId, reason: "view-row", parent: row.p || "" });
+        }
+      } else {
+        missing.push(docId);
       }
-      return;
     }
+    if (missing.length === 0) return;
     if (isLevelEnabled("verbose")) {
-      log.verbose("refreshDoc", { db, docId, reason: "reconcile-missing" });
+      log.verbose("refreshDocs", { db, reason: "reconcile-missing", count: missing.length });
     }
-    await this.reconcileMissingAclRow(db, state, docId);
+    await this.reconcileMissingAclRows(db, state, missing);
   }
 
   /**
@@ -753,6 +793,26 @@ export class AclCache {
    * replication probes from treating private tombstones as writable.
    */
   private async reconcileMissingAclRow(db: string, state: DbAclState, id: string): Promise<void> {
+    await this.reconcileMissingAclRows(db, state, [id]);
+  }
+
+  /** Batched `_all_docs` reconcile for ids absent from the ACL view. */
+  private async reconcileMissingAclRows(
+    db: string,
+    state: DbAclState,
+    ids: string[],
+  ): Promise<void> {
+    for (let i = 0; i < ids.length; i += ACL_REFRESH_BATCH_SIZE) {
+      const chunk = ids.slice(i, i + ACL_REFRESH_BATCH_SIZE);
+      await this.reconcileMissingAclRowsChunk(db, state, chunk);
+    }
+  }
+
+  private async reconcileMissingAclRowsChunk(
+    db: string,
+    state: DbAclState,
+    ids: string[],
+  ): Promise<void> {
     let meta;
     try {
       meta = await this.admin.json<{
@@ -763,7 +823,7 @@ export class AclCache {
       }>(`/${encodeURIComponent(db)}/_all_docs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keys: [id] }),
+        body: JSON.stringify({ keys: ids }),
       });
     } catch (err) {
       const message = `Document state unavailable in ${db}: ${String(err)}`;
@@ -777,50 +837,54 @@ export class AclCache {
       throw new AclUnavailableError(message);
     }
 
-    const row = meta.body.rows?.[0];
-    if (!row || row.error === "not_found") {
-      state.acl.delete(id);
-      state.tombstones?.delete(id);
-      return;
-    }
-
-    if (row.value?.deleted) {
-      const rev = row.value.rev;
-      let recovered: AclRow | undefined;
-      try {
-        recovered = state.generatedAclMap
-          ? await this.recoverAclFromDeletedDoc(db, id, rev)
-          : undefined;
-      } catch (err) {
-        const message = `Deleted ACL unavailable in ${db}: ${String(err)}`;
-        this.markUnavailable(state, message);
-        throw new AclUnavailableError(message);
+    const bodyRows = meta.body.rows ?? [];
+    for (let index = 0; index < ids.length; index++) {
+      const id = ids[index]!;
+      const row = bodyRows[index];
+      if (!row || row.error === "not_found") {
+        state.acl.delete(id);
+        state.tombstones?.delete(id);
+        continue;
       }
-      state.acl.set(id, { ...(recovered ?? this.deniedTombstoneRow(rev)), deleted: true });
-      (state.tombstones ??= new Set()).add(id);
-      return;
-    }
 
-    if (state.generatedAclMap) {
-      try {
-        const live = await this.aclRowFromLiveDoc(db, id, row.value?.rev);
-        if (live) {
-          state.acl.set(id, live);
-          state.tombstones?.delete(id);
-          return;
+      if (row.value?.deleted) {
+        const rev = row.value.rev;
+        let recovered: AclRow | undefined;
+        try {
+          recovered = state.generatedAclMap
+            ? await this.recoverAclFromDeletedDoc(db, id, rev)
+            : undefined;
+        } catch (err) {
+          const message = `Deleted ACL unavailable in ${db}: ${String(err)}`;
+          this.markUnavailable(state, message);
+          throw new AclUnavailableError(message);
         }
-      } catch (err) {
-        const message = `Live document ACL unavailable in ${db}: ${String(err)}`;
-        this.markUnavailable(state, message);
-        throw new AclUnavailableError(message);
+        state.acl.set(id, { ...(recovered ?? this.deniedTombstoneRow(rev)), deleted: true });
+        (state.tombstones ??= new Set()).add(id);
+        continue;
       }
-    }
 
-    // Custom maps cannot be reproduced safely from document ACL fields. A
-    // live document omitted by one of those maps makes policy indeterminate.
-    const message = `ACL view omitted live document ${id} in ${db}`;
-    this.markUnavailable(state, message);
-    throw new AclUnavailableError(message);
+      if (state.generatedAclMap) {
+        try {
+          const live = await this.aclRowFromLiveDoc(db, id, row.value?.rev);
+          if (live) {
+            state.acl.set(id, live);
+            state.tombstones?.delete(id);
+            continue;
+          }
+        } catch (err) {
+          const message = `Live document ACL unavailable in ${db}: ${String(err)}`;
+          this.markUnavailable(state, message);
+          throw new AclUnavailableError(message);
+        }
+      }
+
+      // Custom maps cannot be reproduced safely from document ACL fields. A
+      // live document omitted by one of those maps makes policy indeterminate.
+      const message = `ACL view omitted live document ${id} in ${db}`;
+      this.markUnavailable(state, message);
+      throw new AclUnavailableError(message);
+    }
   }
 
   /**

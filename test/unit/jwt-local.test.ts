@@ -107,4 +107,38 @@ describe("Couch session principal freshness", () => {
     expect(couchFetch).toHaveBeenCalledTimes(2);
     couchFetch.mockRestore();
   });
+
+  it("coalesces concurrent identical credential lookups into one /_session fetch", async () => {
+    const config = loadConfig({
+      COUCH_URL: "http://127.0.0.1:5984",
+      RATE_LIMIT_ENABLED: "false",
+    });
+    let inflight = 0;
+    let maxInflight = 0;
+    let fetches = 0;
+    const couchFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      fetches += 1;
+      inflight += 1;
+      maxInflight = Math.max(maxInflight, inflight);
+      await new Promise((r) => setTimeout(r, 20));
+      inflight -= 1;
+      return new Response(
+        JSON.stringify({ ok: true, userCtx: { name: "bob", roles: ["writers"] } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    const resolver = new SessionResolver(config);
+    const headers = new Headers({ Authorization: "Basic credentials" });
+
+    const principals = await Promise.all([
+      resolver.resolve(headers),
+      resolver.resolve(headers),
+      resolver.resolve(headers),
+    ]);
+
+    expect(fetches).toBe(1);
+    expect(maxInflight).toBe(1);
+    expect(principals.every((p) => p.name === "bob")).toBe(true);
+    couchFetch.mockRestore();
+  });
 });

@@ -10,8 +10,10 @@ import type { DbAclState } from "../acl/cache.js";
 import { canRead } from "../acl/lookup.js";
 import { BodyTooLargeError, limitBytes } from "../util/limitStream.js";
 import { createLogger, isLevelEnabled } from "../util/log.js";
+import { addProfileMs } from "../util/profile.js";
 
 const log = createLogger("filter-changes");
+const textEncoder = new TextEncoder();
 
 type ChangeLine = {
   id?: string;
@@ -88,12 +90,14 @@ function filterLineFeed(
       while (true) {
         // Output backpressure: wait until the consumer has drained.
         while (controller.desiredSize !== null && controller.desiredSize <= 0) {
-          await sleep(10);
+          await sleep(1);
         }
 
         const { done, value } = await reader.read();
         if (done) {
+          const t0 = performance.now();
           flushLine(buffer);
+          addProfileMs("filter", performance.now() - t0);
           controller.close();
           return;
         }
@@ -106,6 +110,7 @@ function filterLineFeed(
           return;
         }
 
+        const t0 = performance.now();
         let newlineIndex: number;
         let enqueued = false;
         while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
@@ -113,20 +118,22 @@ function filterLineFeed(
           buffer = buffer.slice(newlineIndex + 1);
           const out = processLine(rawLine, eventsource);
           if (out != null) {
-            controller.enqueue(new TextEncoder().encode(out + "\n"));
+            controller.enqueue(textEncoder.encode(out + "\n"));
             enqueued = true;
             // Yield after an allowed line so desiredSize can apply backpressure.
             if (controller.desiredSize !== null && controller.desiredSize <= 0) {
+              addProfileMs("filter", performance.now() - t0);
               return;
             }
           }
         }
+        addProfileMs("filter", performance.now() - t0);
         if (enqueued) return;
       }
 
       function flushLine(line: string) {
         const out = processLine(line, eventsource);
-        if (out != null) controller.enqueue(new TextEncoder().encode(out + "\n"));
+        if (out != null) controller.enqueue(textEncoder.encode(out + "\n"));
       }
 
       function processLine(rawLine: string, es: boolean): string | null {
@@ -186,6 +193,7 @@ function filterJsonChanges(
     async start(controller) {
       try {
         const text = await new Response(limitBytes(upstream, maxBytes)).text();
+        const t0 = performance.now();
         let body: {
           results?: ChangeLine[];
           last_seq?: unknown;
@@ -215,7 +223,8 @@ function filterJsonChanges(
           });
         }
         const out = JSON.stringify({ ...body, results });
-        controller.enqueue(new TextEncoder().encode(out));
+        controller.enqueue(textEncoder.encode(out));
+        addProfileMs("filter", performance.now() - t0);
         controller.close();
       } catch (err) {
         controller.error(err);

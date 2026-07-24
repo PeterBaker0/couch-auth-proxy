@@ -72,7 +72,7 @@ describe("single-document authorization hardening", () => {
   it("returns 503 when a missing ACL row cannot be confirmed as a create", async () => {
     const state = stateWith([]);
     const { app, services } = appWithState(state);
-    services.aclCache.refreshDoc = vi.fn(async () => {
+    services.aclCache.refreshDocs = vi.fn(async () => {
       throw new AclUnavailableError("view failed");
     });
     const upstream = vi.fn();
@@ -211,9 +211,11 @@ describe("replication revision probes", () => {
   it("refreshes unknown ids before deciding create-path access", async () => {
     const state = stateWith([]);
     const { app, services } = appWithState(state);
-    services.aclCache.refreshDoc = vi.fn(async (_db: string, id: string) => {
-      if (id === "private") {
-        state.acl.set("private", aclRowFromDoc({ _id: "private", creator: "alice" }));
+    services.aclCache.refreshDocs = vi.fn(async (_db: string, ids: readonly string[]) => {
+      for (const id of ids) {
+        if (id === "private") {
+          state.acl.set("private", aclRowFromDoc({ _id: "private", creator: "alice" }));
+        }
       }
     });
     const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -237,7 +239,10 @@ describe("replication revision probes", () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ "new-doc": { missing: ["1-new"] } });
-    expect(services.aclCache.refreshDoc).toHaveBeenCalledTimes(2);
+    expect(services.aclCache.refreshDocs).toHaveBeenCalledWith(
+      "docs",
+      expect.arrayContaining(["private", "new-doc"]),
+    );
   });
 });
 
@@ -695,8 +700,10 @@ describe("_bulk_get cache synchronization", () => {
   it("refreshes requested ids before filtering the Couch response", async () => {
     const state = stateWith([]);
     const { app, services } = appWithState(state);
-    services.aclCache.refreshDoc = vi.fn(async (_db: string, id: string) => {
-      state.acl.set(id, aclRowFromDoc({ _id: id, creator: "bob" }));
+    services.aclCache.refreshDocs = vi.fn(async (_db: string, ids: readonly string[]) => {
+      for (const id of ids) {
+        state.acl.set(id, aclRowFromDoc({ _id: id, creator: "bob" }));
+      }
     });
     const upstream = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       expect(JSON.parse(String(init?.body))).toEqual({
@@ -721,8 +728,8 @@ describe("_bulk_get cache synchronization", () => {
     expect(await res.json()).toEqual({
       results: [{ id: "just-created", docs: [{ ok: { _id: "just-created" } }] }],
     });
-    expect(services.aclCache.refreshDoc).toHaveBeenCalledWith("docs", "just-created");
-    expect(services.aclCache.refreshDoc).toHaveBeenCalledTimes(1);
+    expect(services.aclCache.refreshDocs).toHaveBeenCalledWith("docs", ["just-created"]);
+    expect(services.aclCache.refreshDocs).toHaveBeenCalledTimes(1);
   });
 });
 
