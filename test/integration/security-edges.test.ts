@@ -230,6 +230,12 @@ describe("security edge cases", () => {
         authHeaders("jwt", bobJwt),
       );
       expect(ownerPut.ok).toBe(true);
+      const ownerPutBody = (await ownerPut.json()) as { rev: string };
+      const ownerDelete = await fetch(
+        `${PROXY}/${DB}/${ids.bobOwner}/${encodeURIComponent("owner.txt")}?rev=${encodeURIComponent(ownerPutBody.rev)}`,
+        { method: "DELETE", headers: authHeaders("jwt", bobJwt) },
+      );
+      expect(ownerDelete.ok).toBe(true);
 
       const aliceDoc = await getDoc(DB, ids.withAtt, authHeaders("jwt", aliceJwt));
       const aliceRev = ((await aliceDoc.json()) as { _rev: string })._rev;
@@ -562,6 +568,19 @@ describe("security edge cases", () => {
       expect(idsSeen).not.toContain(ids.alicePrivate);
     });
 
+    it("feed=live alias remains ACL-filtered", async () => {
+      const lines = await collectChangesFeed(
+        `${PROXY}/${DB}/_changes?feed=live&since=0&heartbeat=500&include_docs=true`,
+        authHeaders("jwt", carolJwt),
+        2500,
+        30,
+      );
+      const idsSeen = lines.map((line) => line.id).filter(Boolean);
+      expect(idsSeen).toContain(ids.open);
+      expect(idsSeen).not.toContain(ids.alicePrivate);
+      expect(idsSeen).not.toContain(ids.withAtt);
+    });
+
     it("unknown feed style is rejected (400), not passed through", async () => {
       const res = await fetch(`${PROXY}/${DB}/_changes?feed=evil`, {
         headers: authHeaders("jwt", bobJwt),
@@ -827,6 +846,39 @@ describe("security edge cases", () => {
       expect(carol.status).toBe(404);
     });
 
+    it("an open document cannot be claimed by adding creator or empty policy fields", async () => {
+      const current = await getDoc(DB, ids.open, authHeaders("jwt", bobJwt));
+      const doc = (await current.json()) as Record<string, unknown>;
+
+      const claim = await putDoc(
+        DB,
+        ids.open,
+        { ...doc, creator: "bob" },
+        authHeaders("jwt", bobJwt),
+      );
+      expect(claim.status).toBeGreaterThanOrEqual(400);
+
+      const close = await putDoc(DB, ids.open, { ...doc, acl: [] }, authHeaders("jwt", bobJwt));
+      expect(close.status).toBeGreaterThanOrEqual(400);
+      expect((await getDoc(DB, ids.open, authHeaders("jwt", daveJwt))).status).toBe(200);
+    });
+
+    it("rejects malformed ACL metadata instead of indexing it as open", async () => {
+      for (const [suffix, metadata] of [
+        ["creator", { creator: "" }],
+        ["acl", { acl: "bob" }],
+        ["owners", { owners: {} }],
+      ] as const) {
+        const res = await putDoc(
+          DB,
+          `malformed-${suffix}-${suiteId}`,
+          metadata,
+          authHeaders("jwt", bobJwt),
+        );
+        expect(res.status, suffix).toBeGreaterThanOrEqual(400);
+      }
+    });
+
     it("role owner can change readers but cannot retarget parent inheritance", async () => {
       const current = await getDoc(DB, ids.roleOwner, authHeaders("jwt", bobJwt));
       expect(current.status).toBe(200);
@@ -945,6 +997,37 @@ describe("security edge cases", () => {
       const rev = ((await current.json()) as { _rev: string })._rev;
       const deleted = await deleteDoc(DB, childId, rev, authHeaders("jwt", bobJwt));
       expect(deleted.ok, `inherited delete: ${deleted.status} ${await deleted.text()}`).toBe(true);
+    });
+
+    it("deleting a parent immediately revokes inherited child grants", async () => {
+      const parentId = `deleted-parent-${suiteId}`;
+      const childId = `orphaned-child-${suiteId}`;
+      expect(
+        (
+          await putDoc(
+            DB,
+            parentId,
+            { creator: "bob", kind: "deleted-parent" },
+            authHeaders("jwt", bobJwt),
+          )
+        ).ok,
+      ).toBe(true);
+      expect(
+        (
+          await putDoc(
+            DB,
+            childId,
+            { creator: "alice", parent: parentId, kind: "orphaned-child" },
+            authHeaders("jwt", aliceJwt),
+          )
+        ).ok,
+      ).toBe(true);
+      await waitForReadable(DB, childId, authHeaders("jwt", bobJwt));
+
+      const parent = await getDoc(DB, parentId, authHeaders("jwt", bobJwt));
+      const parentRev = ((await parent.json()) as { _rev: string })._rev;
+      expect((await deleteDoc(DB, parentId, parentRev, authHeaders("jwt", bobJwt))).ok).toBe(true);
+      expect((await getDoc(DB, childId, authHeaders("jwt", bobJwt))).status).toBe(404);
     });
 
     it("restrict.* hides DB from _all_dbs and returns 404 on access", async () => {
@@ -1086,6 +1169,40 @@ describe("security edge cases", () => {
   // ── Misc default-deny / admin surfaces ─────────────────────────────────
 
   describe("default-deny leftovers", () => {
+    it("HEAD on filtered list endpoints succeeds without parsing an empty Couch body", async () => {
+      for (const url of [
+        `${PROXY}/_all_dbs`,
+        `${PROXY}/${DB}/_all_docs`,
+        `${PROXY}/${DB}/_design/app/_view/by_kind?reduce=false`,
+      ]) {
+        const res = await fetch(url, {
+          method: "HEAD",
+          headers: authHeaders("jwt", bobJwt),
+        });
+        expect(res.status, url).toBe(200);
+        expect(await res.text()).toBe("");
+      }
+    });
+
+    it("does not trust forwarded host headers in Couch write locations", async () => {
+      const id = `location-${suiteId}`;
+      const res = await fetch(`${PROXY}/${DB}/${id}`, {
+        method: "PUT",
+        headers: {
+          ...authHeaders("jwt", bobJwt),
+          "Content-Type": "application/json",
+          "X-Forwarded-Host": "attacker.invalid",
+          "X-Forwarded-Proto": "https",
+        },
+        body: JSON.stringify({ _id: id, creator: "bob", kind: "location" }),
+      });
+      expect(res.ok).toBe(true);
+      const location = res.headers.get("location");
+      expect(location).toBeTruthy();
+      expect(location).not.toContain("attacker.invalid");
+      expect(location).not.toContain("couchdb:5984");
+    });
+
     it("search/nouveau paths are admin-only", async () => {
       const search = await fetch(`${PROXY}/${DB}/_design/app/_search/foo`, {
         headers: authHeaders("jwt", aliceJwt),

@@ -44,19 +44,25 @@ export function buildAclDesignDoc(version = "2.3.0") {
  */
 export const ACL_MAP_SOURCE = `function (doc) {
   var r = { s: doc._rev || "", p: "", _r: {}, _w: {}, _d: {} };
-  var tmp = "", i, ctr = 0;
+  var tmp = "", i;
   var cr = doc.creator, acl = doc.acl, ow = doc.owners;
   var S = "string", O = "object", F = "function";
   var rr = /^r-/, ru = /^u-/;
+  var has = function (o, k) {
+    return Object.prototype.hasOwnProperty.call(o, k);
+  };
+  var hasCr = has(doc, "creator");
+  var hasAcl = has(doc, "acl");
+  var hasOw = has(doc, "owners");
+  var ctr = (hasCr ? 1 : 0) + (hasAcl ? 1 : 0) + (hasOw ? 1 : 0);
 
-  if (typeof cr == S && cr) {
+  if (hasCr && typeof cr == S && cr) {
     tmp = cr;
     if (!ru.test(tmp)) tmp = "u-" + tmp;
     r._r[tmp] = r._w[tmp] = r._d[tmp] = 1;
-    ctr += 1;
   }
 
-  if (acl != null && typeof acl == O && typeof acl.slice == F) {
+  if (hasAcl && acl != null && typeof acl == O && typeof acl.slice == F) {
     for (i = 0; i < acl.length; i++) {
       tmp = acl[i];
       if (typeof tmp == S) {
@@ -64,10 +70,9 @@ export const ACL_MAP_SOURCE = `function (doc) {
         else r._r["u-" + tmp] = 1;
       }
     }
-    ctr += 1;
   }
 
-  if (ow != null && typeof ow == O && typeof ow.slice == F) {
+  if (hasOw && ow != null && typeof ow == O && typeof ow.slice == F) {
     for (i = 0; i < ow.length; i++) {
       tmp = ow[i];
       if (typeof tmp == S) {
@@ -75,7 +80,6 @@ export const ACL_MAP_SOURCE = `function (doc) {
         r._r[tmp] = r._w[tmp] = 1;
       }
     }
-    ctr += 1;
   }
 
   if (!ctr) {
@@ -105,18 +109,43 @@ export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
   var isA = function (o) {
     return typeof o == O && typeof o.slice == F;
   };
+  var has = function (o, k) {
+    return Object.prototype.hasOwnProperty.call(o, k);
+  };
+  var validList = function (o) {
+    if (!isA(o)) return false;
+    for (var j = 0; j < o.length; j++) {
+      if (typeof o[j] != S || !o[j]) return false;
+    }
+    return true;
+  };
+  var listSig = function (o, k) {
+    if (!has(o, k)) return "missing";
+    if (!isA(o[k])) return "invalid";
+    return JSON.stringify(o[k].slice().sort());
+  };
 
   if (!adm) {
+    if (!nd._deleted) {
+      if (has(nd, "creator") && (typeof nd.creator != S || !nd.creator))
+        throw { forbidden: "Creator must be a non-empty string." };
+      if (has(nd, "owners") && !validList(nd.owners))
+        throw { forbidden: "Owners must be an array of non-empty strings." };
+      if (has(nd, "acl") && !validList(nd.acl))
+        throw { forbidden: "ACL must be an array of non-empty strings." };
+      if (has(nd, "parent") && typeof nd.parent != S)
+        throw { forbidden: "Parent must be a string." };
+    }
+
     if (!od) {
-      if (nd.creator && nd.creator != u && nd.creator != uu)
+      if (has(nd, "creator") && nd.creator != u && nd.creator != uu)
         throw { forbidden: "Can't create doc on behalf of other user." };
     } else {
       var odc = od.creator;
-      var odw = (isA(od.owners) ? od.owners : []).sort();
-      var oda = isA(od.acl) ? od.acl.sort() + "" : "";
+      var odw = (isA(od.owners) ? od.owners.slice() : []).sort();
+      var odws = listSig(od, "owners");
+      var odas = listSig(od, "acl");
       var ndc = nd.creator;
-      var ndw = (isA(nd.owners) ? nd.owners : []).sort();
-      var nda = isA(nd.acl) ? nd.acl.sort() + "" : "";
       var notCreator = odc != u && odc != uu;
       var notOwner = notCreator && odw.indexOf(u) == -1 && odw.indexOf(uu) == -1;
       var i, roleToken;
@@ -130,10 +159,11 @@ export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
       var ndp = typeof nd.parent == S ? nd.parent : "";
 
       if (!nd._deleted) {
-        if (odc != ndc) throw { forbidden: "Creator can not be changed." };
-        if (notCreator && odw + "" != ndw + "")
+        if (has(od, "creator") != has(nd, "creator") || odc != ndc)
+          throw { forbidden: "Creator can not be changed." };
+        if (notCreator && odws != listSig(nd, "owners"))
           throw { forbidden: "Owners list can not be changed." };
-        if (notOwner && oda != nda)
+        if (notOwner && odas != listSig(nd, "acl"))
           throw { forbidden: "Readers list can not be changed." };
         if (notCreator && odp != ndp)
           throw { forbidden: "Parent can not be changed." };

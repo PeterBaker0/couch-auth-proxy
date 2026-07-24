@@ -32,9 +32,15 @@ const STRIP_FROM_CLIENT = new Set([
   "x-auth-couchdb-username",
   "x-auth-couchdb-roles",
   "x-auth-couchdb-token",
+  "forwarded",
+  "x-forwarded-host",
+  "x-forwarded-port",
+  "x-forwarded-proto",
 ]);
 
 export type ForwardOptions = {
+  /** Override method (used to obtain a filterable representation for HEAD). */
+  method?: string;
   /** Override path (default: incoming path) */
   path?: string;
   /** Optional query string including `?` */
@@ -43,6 +49,10 @@ export type ForwardOptions = {
   body?: ArrayBuffer | Blob | string | ReadableStream<Uint8Array> | null;
   /** Extra request headers to set/override */
   headers?: Record<string, string>;
+  /** Incoming headers that must not reach Couch for this request. */
+  stripRequestHeaders?: string[];
+  /** Upstream response headers that must not reach the client. */
+  stripResponseHeaders?: string[];
   /** When true, do not strip content-encoding (raw pipe of compressed bodies) */
   keepEncoding?: boolean;
 };
@@ -66,7 +76,13 @@ export async function forwardToCouch(
 ): Promise<Response> {
   try {
     const upstream = await fetchFromCouch(c, config, options);
-    return toClientResponse(upstream, { keepEncoding: options?.keepEncoding });
+    return toClientResponse(upstream, {
+      keepEncoding: options?.keepEncoding,
+      stripHeaders: options?.stripResponseHeaders,
+      rewriteLocation: {
+        fromOrigin: new URL(config.couch.url).origin,
+      },
+    });
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
       return couchError("bad_request", "Request body too large", 413);
@@ -99,17 +115,21 @@ export async function fetchFromCouch(
   }
 
   const headers = new Headers();
+  const stripRequestHeaders = new Set(
+    (options?.stripRequestHeaders ?? []).map((header) => header.toLowerCase()),
+  );
   incoming.headers.forEach((value, key) => {
     const lowerKey = key.toLowerCase();
     if (HOP_BY_HOP.has(lowerKey)) return;
     if (STRIP_FROM_CLIENT.has(lowerKey)) return;
+    if (stripRequestHeaders.has(lowerKey)) return;
     headers.set(key, value);
   });
   if (options?.headers) {
     for (const [key, value] of Object.entries(options.headers)) headers.set(key, value);
   }
 
-  const method = incoming.method;
+  const method = options?.method ?? incoming.method;
   const hasBody = !["GET", "HEAD"].includes(method);
   const bodyOverridden = options?.body !== undefined;
   let body: ArrayBuffer | Blob | string | ReadableStream<Uint8Array> | null | undefined = hasBody
@@ -182,16 +202,38 @@ export async function fetchFromCouch(
  */
 export function toClientResponse(
   upstream: Response,
-  options?: { keepEncoding?: boolean; body?: ReadableStream<Uint8Array> | string | null },
+  options?: {
+    keepEncoding?: boolean;
+    body?: ReadableStream<Uint8Array> | string | null;
+    stripHeaders?: string[];
+    rewriteLocation?: { fromOrigin: string };
+  },
 ): Response {
   const responseHeaders = new Headers();
+  const stripHeaders = new Set((options?.stripHeaders ?? []).map((header) => header.toLowerCase()));
+  const decoded = !options?.keepEncoding && upstream.headers.has("content-encoding");
   upstream.headers.forEach((value, key) => {
     const lowerKey = key.toLowerCase();
     if (HOP_BY_HOP.has(lowerKey)) return;
-    if (!options?.keepEncoding && lowerKey === "content-encoding") return;
+    if (stripHeaders.has(lowerKey)) return;
+    if (decoded && (lowerKey === "content-encoding" || lowerKey === "content-length")) return;
     if (lowerKey === "content-length" && options?.body !== undefined) return;
     responseHeaders.set(key, value);
   });
+
+  const location = responseHeaders.get("location");
+  if (location && options?.rewriteLocation && /^[a-z][a-z\d+.-]*:\/\//i.test(location)) {
+    try {
+      const parsed = new URL(location);
+      if (parsed.origin === options.rewriteLocation.fromOrigin) {
+        // Resolve against the caller's public origin (including TLS
+        // termination) without trusting forwarded host/proto headers.
+        responseHeaders.set("location", `${parsed.pathname}${parsed.search}${parsed.hash}`);
+      }
+    } catch {
+      // Preserve malformed upstream values; clients can handle them as Couch sent them.
+    }
+  }
 
   const body = options?.body !== undefined ? options.body : upstream.body;
   return new Response(body, {

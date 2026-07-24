@@ -27,6 +27,11 @@ export type AclRow = {
   s: string | number;
   /** Parent doc id for ACL inheritance; empty string if none. */
   p: string;
+  /**
+   * Retained tombstone row. Its grants remain usable for the document's own
+   * `_changes` tombstone, but must not be inherited by children.
+   */
+  deleted?: true;
   _r: Record<string, 1 | true>;
   _w: Record<string, 1 | true>;
   _d: Record<string, 1 | true>;

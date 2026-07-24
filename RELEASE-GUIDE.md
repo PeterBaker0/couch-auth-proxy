@@ -66,6 +66,7 @@ For a release tag `v2.1.3` (stable, not a pre-release), the workflow applies:
 | Tag           | Meaning                                         |
 | ------------- | ----------------------------------------------- |
 | `2.1.3`       | Exact semver (no leading `v`)                   |
+| `v2.1.3`      | Exact semver with leading `v` (matches git tag) |
 | `2.1`         | Major.minor floating tag                        |
 | `2`           | Major floating tag                              |
 | `latest`      | Latest stable release (omitted for prereleases) |
@@ -77,6 +78,8 @@ Pre-releases (GitHub Release marked as pre-release, e.g. `v2.1.3-rc.1`) get the 
 
 ```bash
 docker pull ghcr.io/peterbaker0/couch-auth-proxy:2.0.0
+# or
+docker pull ghcr.io/peterbaker0/couch-auth-proxy:v2.0.0
 # or
 docker pull ghcr.io/peterbaker0/couch-auth-proxy:latest
 ```

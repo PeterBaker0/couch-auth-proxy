@@ -82,6 +82,7 @@ Spoofed `X-Auth-CouchDB-*` headers from clients are stripped.
 | `parent`  | inherit parent ACL (most permissive wins)                       |
 
 Missing `creator` / `owners` / `acl` → open to `r-*` (**authenticated** DB users). Anonymous callers do not receive `r-*`. Design docs default read-only for `r-*`.
+Present ACL fields are type-checked by the generated validation function and malformed values fail closed. An absent creator cannot later be claimed by a non-admin.
 
 Bucket rules live on `_design/acl`:
 
@@ -91,7 +92,7 @@ Bucket rules live on `_design/acl`:
 
 ## API coverage
 
-ACL-filtered: single docs + attachments, same-database `COPY`, `_all_docs`, `_design_docs`, `_local_docs`, `_bulk_get`, views, `_changes` (incl. continuous), `_bulk_docs`, `_revs_diff` / `_missing_revs`, `_find`, partition `_all_docs`/`_find`/views, `_all_dbs`.
+ACL-filtered: single docs + attachments, same-database `COPY`, `_all_docs`, `_design_docs`, `_local_docs`, `_bulk_get`, views, `_changes` (incl. `continuous` / `live`), `_bulk_docs`, `_revs_diff` / `_missing_revs`, `_find`, partition `_all_docs`/`_find`/views, `_all_dbs`.
 
 Admin-only: Fauxton `/_utils`, `/_node/*`, `/_scheduler/*`, `/_replicate`, `/_db_updates`, DB create/delete, `_security`, `_revs_limit`, compaction, Mango `_index` management, search/nouveau, other partition paths.
 
@@ -104,7 +105,9 @@ Unmapped endpoints return **404** for non-admins (default-deny). `_list`, `_show
 - Targeted `_update` handlers require read, write, and delete on the document because a handler may emit arbitrary updates or tombstones. Handlers without a target document are **501**.
 - Non-admin multipart document writes are **415** because tombstone metadata cannot be authorized safely without buffering the full MIME body. Use JSON document writes plus the attachment endpoints.
 - Deletion tombstones stay visible on `_changes` to principals who could read the doc (last ACL retained / recovered from the pre-delete revision). Users who never had read access do not see tombstones (no existence leak).
-- Keyed `_all_docs` / view queries may return `not_found` placeholders for denied ids (positional alignment). Non-keyed listings **drop** denied rows — never emit placeholders that would leak foreign ids.
+- Keyed document-list queries such as `_all_docs` may return `not_found` placeholders for denied ids (the caller supplied those document ids). Custom view queries always drop denied rows because a view key does not prove knowledge of the matching document ids.
+- Linked-view `include_docs` rows are authorized against both the source row and the embedded target document.
+- Principal-dependent list responses disable shared validators and caching so an old authorized representation cannot survive an ACL or role change.
 - Filtered row responses omit unfiltered `total_rows`, `offset`, and `update_seq`; Mango responses omit unfiltered execution statistics for non-admins.
 - Continuous `_changes` sequences are opaque strings (Couch 2+/3); never treat them as integers.
 - ACL cache is ~hundreds of bytes per doc per process; preload via `COUCH_PRELOAD_DBS`.
@@ -129,7 +132,7 @@ Unmapped endpoints return **404** for non-admins (default-deny). `_list`, `_show
 | `COUCH_MAX_ID_LENGTH`                                            | Maximum accepted document-id length (default `200`)                                                                                                                                                                                                                    |
 | `CORS_ORIGINS`                                                   | Comma allowlist (**required for browser CORS**; empty = no Origin reflection)                                                                                                                                                                                          |
 | `TRUST_PROXY_HOPS`                                               | Trusted reverse-proxy hops for client IP (default `0` = ignore `X-Forwarded-For`)                                                                                                                                                                                      |
-| `SESSION_CACHE_TTL_MS` / `SESSION_CACHE_MAX`                     | Session principal cache TTL + LRU size                                                                                                                                                                                                                                 |
+| `SESSION_CACHE_TTL_MS` / `SESSION_CACHE_MAX`                     | Session principal cache TTL (default `0`, disabled) + LRU size. Enabling it accepts a role/admin revocation delay up to the configured TTL.                                                                                                                            |
 | `RATE_LIMIT_*`                                                   | Global + per-IP limits                                                                                                                                                                                                                                                 |
 | `MAX_BODY_BYTES`                                                 | Request body ceiling (Content-Length + streamed bodies)                                                                                                                                                                                                                |
 | `SHUTDOWN_TIMEOUT_MS`                                            | Drain timeout before force-exit                                                                                                                                                                                                                                        |
@@ -208,6 +211,6 @@ pnpm test:integration         # needs stack up
 
 Pre-commit runs `oxfmt` on staged files via husky + lint-staged (`pnpm prepare` after install).
 
-Integration includes PouchDB in-memory sync (`test/integration/pouch-sync.test.ts`), a real CouchDB 3.5 partitioned database (`partitioned.test.ts`), env DB/route access policy (`env-access-policy.test.ts`), and fail-closed security edges (`security-edges.test.ts`, `security-deep.test.ts`): attachments (inline/`_bulk_get`/`_changes`/unicode/Range), custom views + reduce/group rejection (query **and** POST body), keyed vs non-keyed list id-leak guards, deletion tombstones, design-doc filters + `style=all_docs`, `open_revs`/meta probes, filtered replica streams (`doc_ids` / selector / longpoll / eventsource), bulk `all_or_nothing` / `new_edits:false`, `_show`/`_update` without doc id, `_explain`/index admin-only, `_local` checkpoints, ACL revocation, and `restrict` rules.
+Integration includes PouchDB in-memory sync (`test/integration/pouch-sync.test.ts`), a real CouchDB 3.5 partitioned database (`partitioned.test.ts`), env DB/route access policy (`env-access-policy.test.ts`), and fail-closed security edges (`security-edges.test.ts`, `security-deep.test.ts`): attachments (inline/`_bulk_get`/`_changes`/unicode/Range), linked views, custom-view key privacy, reduce/group rejection (query **and** POST body), creator-less and malformed ACL writes, deleted-parent revocation, filtered HEAD requests, keyed vs non-keyed list id-leak guards, deletion tombstones, design-doc filters + `style=all_docs`, `open_revs`/meta probes, filtered replica streams (`doc_ids` / selector / longpoll / continuous / live / eventsource), bulk `all_or_nothing` / `new_edits:false`, `_show`/`_update` controls, `_explain`/index admin-only, `_local` checkpoints, ACL revocation, and `restrict` rules.
 
 # couch-auth-proxy

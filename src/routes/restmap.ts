@@ -59,6 +59,7 @@ export const ROUTES: RouteDef[] = [
   { method: "post", path: "/_session", actors: ["session"], features: ["session"] },
   { method: "delete", path: "/_session", actors: ["session"], features: ["session"] },
   { method: "get", path: "/_all_dbs", actors: ["dblist"], features: ["all_dbs"] },
+  { method: "head", path: "/_all_dbs", actors: ["dblist"], features: ["all_dbs"] },
   { method: "get", path: "/_dbs_info", actors: ["admin"], features: ["admin"] },
   { method: "post", path: "/_dbs_info", actors: ["admin"], features: ["admin"] },
   { method: "get", path: "/_active_tasks", actors: ["admin"], features: ["admin"] },
@@ -78,10 +79,13 @@ export const ROUTES: RouteDef[] = [
   { method: "post", path: "/:db", actors: ["db", "docWrite", "pipe"], features: ["docs"] },
 
   { method: "get", path: "/:db/_all_docs", actors: ["db", "rows"], features: ["all_docs"] },
+  { method: "head", path: "/:db/_all_docs", actors: ["db", "rows"], features: ["all_docs"] },
   { method: "post", path: "/:db/_all_docs", actors: ["db", "rows"], features: ["all_docs"] },
   { method: "get", path: "/:db/_design_docs", actors: ["db", "rows"], features: ["all_docs"] },
+  { method: "head", path: "/:db/_design_docs", actors: ["db", "rows"], features: ["all_docs"] },
   { method: "post", path: "/:db/_design_docs", actors: ["db", "rows"], features: ["all_docs"] },
   { method: "get", path: "/:db/_local_docs", actors: ["db", "rows"], features: ["all_docs"] },
+  { method: "head", path: "/:db/_local_docs", actors: ["db", "rows"], features: ["all_docs"] },
   { method: "post", path: "/:db/_local_docs", actors: ["db", "rows"], features: ["all_docs"] },
   { method: "post", path: "/:db/_bulk_docs", actors: ["db", "bulk"], features: ["bulk_docs"] },
   { method: "post", path: "/:db/_bulk_get", actors: ["db", "bulkGet"], features: ["bulk_get"] },
@@ -140,6 +144,12 @@ export const ROUTES: RouteDef[] = [
     features: ["partition", "all_docs"],
   },
   {
+    method: "head",
+    path: "/:db/_partition/:partition/_all_docs",
+    actors: ["db", "rows"],
+    features: ["partition", "all_docs"],
+  },
+  {
     method: "post",
     path: "/:db/_partition/:partition/_all_docs",
     actors: ["db", "rows"],
@@ -153,6 +163,12 @@ export const ROUTES: RouteDef[] = [
   },
   {
     method: "get",
+    path: "/:db/_partition/:partition/_design/:ddoc/_view/:view",
+    actors: ["db", "rows"],
+    features: ["partition", "views"],
+  },
+  {
+    method: "head",
     path: "/:db/_partition/:partition/_design/:ddoc/_view/:view",
     actors: ["db", "rows"],
     features: ["partition", "views"],
@@ -216,6 +232,18 @@ export const ROUTES: RouteDef[] = [
   },
   {
     method: "get",
+    path: "/:db/_design/:ddoc/_search_disk_size/:index",
+    actors: ["admin"],
+    features: ["admin"],
+  },
+  {
+    method: "get",
+    path: "/:db/_design/:ddoc/_view/:view",
+    actors: ["db", "rows"],
+    features: ["views"],
+  },
+  {
+    method: "head",
     path: "/:db/_design/:ddoc/_view/:view",
     actors: ["db", "rows"],
     features: ["views"],
@@ -279,6 +307,30 @@ export const ROUTES: RouteDef[] = [
     method: "post",
     path: "/:db/_design/:ddoc/_update/:update",
     actors: ["unsupported"],
+    features: ["update"],
+  },
+  {
+    method: "get",
+    path: "/:db/_design/:ddoc/_update/:update",
+    actors: ["unsupported"],
+    features: ["update"],
+  },
+  {
+    method: "head",
+    path: "/:db/_design/:ddoc/_update/:update",
+    actors: ["unsupported"],
+    features: ["update"],
+  },
+  {
+    method: "get",
+    path: "/:db/_design/:ddoc/_update/:update/:docId",
+    actors: ["db", "docUpdate", "pipe"],
+    features: ["update"],
+  },
+  {
+    method: "head",
+    path: "/:db/_design/:ddoc/_update/:update/:docId",
+    actors: ["db", "docUpdate", "pipe"],
     features: ["update"],
   },
   {
@@ -400,7 +452,7 @@ export const ROUTES: RouteDef[] = [
   {
     method: "delete",
     path: "/:db/_design/:ddoc/:attachment{.+}",
-    actors: ["db", "docDelete", "pipe"],
+    actors: ["db", "docWrite", "pipe"],
     features: ["design", "attachments"],
   },
 
@@ -441,7 +493,7 @@ export const ROUTES: RouteDef[] = [
   {
     method: "delete",
     path: "/:db/:docId/:attachment{.+}",
-    actors: ["db", "docDelete", "pipe"],
+    actors: ["db", "docWrite", "pipe"],
     features: ["attachments"],
   },
 ];

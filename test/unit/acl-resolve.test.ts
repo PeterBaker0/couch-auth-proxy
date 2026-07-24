@@ -101,6 +101,23 @@ describe("resolveDocAcl", () => {
     ).toEqual({ _r: true, _w: true, _d: true });
   });
 
+  it("does not inherit grants from a deleted parent tombstone", () => {
+    const parent = { ...aclRowFromDoc({ _id: "parent", creator: "bob" }), deleted: true as const };
+    const child = aclRowFromDoc({
+      _id: "child",
+      creator: "alice",
+      parent: "parent",
+    });
+    expect(
+      resolveDocAcl({
+        principal: principal("bob"),
+        docId: "child",
+        row: child,
+        parentRow: parent,
+      }),
+    ).toEqual({ _r: false, _w: false, _d: false });
+  });
+
   it("applies database-level delete grants", () => {
     const row = aclRowFromDoc({ _id: "doc", creator: "alice" });
     expect(
@@ -111,6 +128,26 @@ describe("resolveDocAcl", () => {
         dbacl: { _d: ["u-bob"] },
       }),
     ).toEqual({ _r: false, _w: false, _d: true });
+  });
+
+  it("treats bare dbacl grants as usernames, not role names", () => {
+    const row = aclRowFromDoc({ _id: "doc", creator: "alice" });
+    expect(
+      resolveDocAcl({
+        principal: principal("bob", ["writers"]),
+        docId: "doc",
+        row,
+        dbacl: { _r: ["writers"] },
+      })._r,
+    ).toBe(false);
+    expect(
+      resolveDocAcl({
+        principal: principal("writers"),
+        docId: "doc",
+        row,
+        dbacl: { _r: ["writers"] },
+      })._r,
+    ).toBe(true);
   });
 
   it("open docs (no creator/owners/acl) allow r-*", () => {
@@ -139,5 +176,18 @@ describe("aclRowFromDoc map parity", () => {
       creator: "alice",
     });
     expect(row.s).toBe("3-current");
+  });
+
+  it("fails closed when present ACL metadata has a malformed type", () => {
+    for (const doc of [
+      { _id: "bad-creator", creator: "" },
+      { _id: "bad-acl", acl: "alice" },
+      { _id: "bad-owners", owners: {} },
+    ]) {
+      const row = aclRowFromDoc(doc);
+      expect(row._r).toEqual({});
+      expect(row._w).toEqual({});
+      expect(row._d).toEqual({});
+    }
   });
 });

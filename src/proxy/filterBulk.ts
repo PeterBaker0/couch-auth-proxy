@@ -123,6 +123,119 @@ export function mergeBulkResults(
 }
 
 /**
+ * CouchDB omits successful rows from `new_edits:false` responses and returns
+ * only per-document errors. Rebuild one result per allowed input by matching
+ * errors by id+revision and synthesizing the omitted successes.
+ */
+export function normalizeBulkResults(
+  allowed: BulkDoc[],
+  couchResults: Array<Record<string, unknown>>,
+  newEditsFalse: boolean,
+): Array<Record<string, unknown>> {
+  if (!newEditsFalse) return couchResults;
+
+  const idCounts = new Map<string, number>();
+  for (const doc of allowed) {
+    if (typeof doc._id === "string") {
+      idCounts.set(doc._id, (idCounts.get(doc._id) ?? 0) + 1);
+    }
+  }
+  const exact = new Map<string, number[]>();
+  const byId = new Map<string, number[]>();
+  const withoutRev = new Map<string, number[]>();
+  const unidentified: number[] = [];
+  const used = new Set<number>();
+  for (let index = 0; index < couchResults.length; index++) {
+    const result = couchResults[index]!;
+    if (typeof result.id !== "string") {
+      unidentified.push(index);
+      continue;
+    }
+    pushIndex(byId, result.id, index);
+    if (typeof result.rev === "string") {
+      pushIndex(exact, resultIdentity(result.id, result.rev), index);
+    } else {
+      pushIndex(withoutRev, result.id, index);
+    }
+  }
+
+  return allowed.map((doc) => {
+    const id = typeof doc._id === "string" ? doc._id : undefined;
+    const rev = bulkDocRevision(doc);
+    let match: number | undefined;
+    if (id && rev) {
+      match = takeUnused(exact.get(resultIdentity(id, rev)), used);
+    }
+    if (match == null && id && idCounts.get(id) === 1) {
+      match = takeUnused(byId.get(id), used);
+    }
+    if (match == null && allowed.length === 1) {
+      match = takeUnused(unidentified, used);
+    }
+    if (match != null) {
+      used.add(match);
+      return couchResults[match]!;
+    }
+
+    const ambiguous =
+      id != null && (idCounts.get(id) ?? 0) > 1 && hasUnused(withoutRev.get(id), used);
+    if (ambiguous) {
+      return {
+        id,
+        rev,
+        error: "unknown_error",
+        reason: "Ambiguous CouchDB replication result.",
+      };
+    }
+    return {
+      ok: true,
+      id,
+      rev,
+    };
+  });
+}
+
+function resultIdentity(id: string, rev: string): string {
+  return JSON.stringify([id, rev]);
+}
+
+function pushIndex(target: Map<string, number[]>, key: string, index: number): void {
+  const indexes = target.get(key) ?? [];
+  indexes.push(index);
+  target.set(key, indexes);
+}
+
+function takeUnused(indexes: number[] | undefined, used: Set<number>): number | undefined {
+  while (indexes?.length) {
+    const index = indexes.pop()!;
+    if (!used.has(index)) return index;
+  }
+  return undefined;
+}
+
+function hasUnused(indexes: number[] | undefined, used: Set<number>): boolean {
+  return indexes?.some((index) => !used.has(index)) ?? false;
+}
+
+/** Revision identity accepted by Couch replication bodies. */
+function bulkDocRevision(doc: BulkDoc): string | undefined {
+  if (typeof doc._rev === "string") return doc._rev;
+  const revisions = doc._revisions;
+  if (!revisions || typeof revisions !== "object" || Array.isArray(revisions)) return undefined;
+  const start = (revisions as { start?: unknown }).start;
+  const ids = (revisions as { ids?: unknown }).ids;
+  if (
+    typeof start === "number" &&
+    Number.isInteger(start) &&
+    Array.isArray(ids) &&
+    typeof ids[0] === "string"
+  ) {
+    return `${start}-${ids[0]}`;
+  }
+  return undefined;
+}
+
+/**
  * Filter `_revs_diff` / `_missing_revs` request keys by ACL.
  *
  * Include ids the principal may read **or** write/delete. Push replication

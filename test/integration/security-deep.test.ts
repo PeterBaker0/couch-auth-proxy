@@ -36,6 +36,7 @@ const ids = {
   bobReader: `bob-reader-${suiteId}`,
   alicePrivate: `alice-private-${suiteId}`,
   open: `open-${suiteId}`,
+  linkedSource: `linked-source-${suiteId}`,
   withAtt: `with-att-${suiteId}`,
   secretAtt: `secret-att-${suiteId}`,
   tombstone: `tombstone-${suiteId}`,
@@ -61,6 +62,11 @@ async function putAppDesign(): Promise<void> {
         },
         by_id: {
           map: `function (doc) { emit(doc._id, null); }`,
+        },
+        linked_target: {
+          map: `function (doc) {
+            if (doc.linkTo) emit("linked", { _id: doc.linkTo });
+          }`,
         },
       },
       filters: {
@@ -90,6 +96,15 @@ describe("security deep edges", () => {
       [ids.alicePrivate, { creator: "alice", kind: "private", body: "secret" }],
       [ids.bobReader, { creator: "alice", acl: ["u-bob"], kind: "reader", body: "bob-read" }],
       [ids.open, { kind: "open", body: "any-auth" }],
+      [
+        ids.linkedSource,
+        {
+          creator: "alice",
+          acl: ["u-bob"],
+          kind: "linked-source",
+          linkTo: ids.alicePrivate,
+        },
+      ],
       [ids.withAtt, { creator: "alice", acl: ["u-bob"], kind: "att", body: "has-att" }],
       [ids.secretAtt, { creator: "alice", kind: "secret-att", body: "no-bob" }],
       [ids.tombstone, { creator: "alice", acl: ["u-bob"], kind: "tomb", body: "will-delete" }],
@@ -112,6 +127,7 @@ describe("security deep edges", () => {
     await waitForReadable(DB, ids.tombstone, authHeaders("jwt", bobJwt));
     await waitForReadable(DB, ids.reloadTomb, authHeaders("jwt", bobJwt));
     await waitForReadable(DB, ids.open, authHeaders("jwt", daveJwt));
+    await waitForReadable(DB, ids.linkedSource, authHeaders("jwt", bobJwt));
 
     for (const id of [ids.withAtt, ids.secretAtt]) {
       const docRes = await getDoc(DB, id, authHeaders("jwt", aliceJwt));
@@ -405,7 +421,7 @@ describe("security deep edges", () => {
       expect(groupLevel.status).toBe(501);
     });
 
-    it("POST view keys ACL-filters with positional not_found", async () => {
+    it("POST custom-view keys never expose denied document ids", async () => {
       const res = await fetch(`${PROXY}/${DB}/_design/app/_view/by_id`, {
         method: "POST",
         headers: {
@@ -422,12 +438,7 @@ describe("security deep edges", () => {
         rows: Array<{ id?: string; error?: string; key?: string }>;
       };
       expect(body.rows.some((r) => r.id === ids.bobReader || r.key === ids.bobReader)).toBe(true);
-      expect(
-        body.rows.some(
-          (r) =>
-            r.error === "not_found" && (r.id === ids.alicePrivate || r.key === ids.alicePrivate),
-        ),
-      ).toBe(true);
+      expect(JSON.stringify(body.rows)).not.toContain(ids.alicePrivate);
     });
 
     it("view include_docs never embeds unread document bodies", async () => {
@@ -449,7 +460,21 @@ describe("security deep edges", () => {
       }
     });
 
-    it("GET view?key= for denied id yields empty or not_found — never the doc", async () => {
+    it("linked views cannot embed an unread target document", async () => {
+      const res = await fetch(
+        `${PROXY}/${DB}/_design/app/_view/linked_target?include_docs=true&attachments=true`,
+        { headers: authHeaders("jwt", bobJwt) },
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        rows: Array<{ id?: string; doc?: { _id?: string; body?: string } }>;
+      };
+      expect(body.rows.some((row) => row.id === ids.linkedSource)).toBe(false);
+      expect(JSON.stringify(body.rows)).not.toContain(ids.alicePrivate);
+      expect(JSON.stringify(body.rows)).not.toContain("secret");
+    });
+
+    it("GET view?key= for denied id yields no identifying placeholder", async () => {
       const res = await fetch(
         `${PROXY}/${DB}/_design/app/_view/by_id?key=${encodeURIComponent(
           JSON.stringify(ids.alicePrivate),
@@ -460,12 +485,7 @@ describe("security deep edges", () => {
       const body = (await res.json()) as {
         rows: Array<{ id?: string; error?: string; doc?: unknown }>;
       };
-      for (const row of body.rows) {
-        expect(row.doc).toBeFalsy();
-        if (row.id === ids.alicePrivate) {
-          expect(row.error).toBe("not_found");
-        }
-      }
+      expect(body.rows).toEqual([]);
     });
   });
 
@@ -740,6 +760,41 @@ describe("security deep edges", () => {
       const body = (await res.json()) as Array<{ id?: string; error?: string; ok?: boolean }>;
       expect(body.some((r) => r.id === ids.alicePrivate && r.error === "forbidden")).toBe(true);
       expect(body.some((r) => r.ok === true || (r.id && !r.error))).toBe(true);
+    });
+
+    it("new_edits:false replays cannot poison the authoritative ACL cache", async () => {
+      const id = `replay-cache-${suiteId}`;
+      const created = await putDoc(
+        DB,
+        id,
+        {
+          creator: "alice",
+          owners: ["u-bob"],
+          acl: ["u-bob"],
+          kind: "replay-cache",
+        },
+        authHeaders("jwt", aliceJwt),
+      );
+      expect(created.ok).toBe(true);
+      await waitForReadable(DB, id, authHeaders("jwt", bobJwt));
+      const current = await getDoc(DB, id, authHeaders("jwt", bobJwt));
+      const doc = (await current.json()) as Record<string, unknown> & { _rev: string };
+
+      const replay = await fetch(`${PROXY}/${DB}/_bulk_docs`, {
+        method: "POST",
+        headers: {
+          ...authHeaders("jwt", bobJwt),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          new_edits: false,
+          docs: [{ ...doc, acl: ["u-carol"], body: "not-authoritative" }],
+        }),
+      });
+      expect(replay.ok).toBe(true);
+
+      expect((await getDoc(DB, id, authHeaders("jwt", bobJwt))).status).toBe(200);
+      expect((await getDoc(DB, id, authHeaders("jwt", carolJwt))).status).toBe(404);
     });
   });
 
