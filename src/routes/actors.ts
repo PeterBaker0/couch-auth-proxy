@@ -22,7 +22,7 @@ import {
   fetchFromCouch,
   forwardToCouch,
   jsonResponse,
-  toClientResponse,
+  toClientResponseFromCouch,
 } from "../proxy/forward.js";
 import { filterBulkGet, filterRows, type RowsResponse } from "../proxy/filterRows.js";
 import {
@@ -610,19 +610,13 @@ export const actors: Record<string, Actor> = {
           newEditsFalse,
         });
       }
-      return toClientResponse(upstream, {
-        rewriteLocation: {
-          fromOrigin: new URL(config.couch.url).origin,
-        },
-      });
+      return toClientResponseFromCouch(upstream, config);
     }
     if (principal.admin && directDocumentWrite && id) {
       const config = c.get("config");
       const upstream = await fetchFromCouch(c, config);
       if (upstream.ok) await refreshWrittenDoc(c, state, id, true);
-      return toClientResponse(upstream, {
-        rewriteLocation: { fromOrigin: new URL(config.couch.url).origin },
-      });
+      return toClientResponseFromCouch(upstream, config);
     }
     await next();
   },
@@ -662,9 +656,10 @@ export const actors: Record<string, Actor> = {
     if (!allowed) {
       return couchError("forbidden", "ACL", 403);
     }
-    const upstream = await fetchFromCouch(c, c.get("config"));
+    const config = c.get("config");
+    const upstream = await fetchFromCouch(c, config);
     if (upstream.ok) await refreshWrittenDoc(c, state, id, true);
-    return toClientResponse(upstream);
+    return toClientResponseFromCouch(upstream, config);
   },
 
   /**
@@ -722,9 +717,10 @@ export const actors: Record<string, Actor> = {
       user: principal.name,
       flags,
     });
-    const upstream = await fetchFromCouch(c, c.get("config"));
+    const config = c.get("config");
+    const upstream = await fetchFromCouch(c, config);
     if (upstream.ok) await refreshWrittenDoc(c, state, id, true);
-    return toClientResponse(upstream);
+    return toClientResponseFromCouch(upstream, config);
   },
 
   /**
@@ -808,9 +804,7 @@ export const actors: Record<string, Actor> = {
     const config = c.get("config");
     const upstream = await fetchFromCouch(c, config);
     if (upstream.ok) await refreshWrittenDoc(c, state, destId, false);
-    return toClientResponse(upstream, {
-      rewriteLocation: { fromOrigin: new URL(config.couch.url).origin },
-    });
+    return toClientResponseFromCouch(upstream, config);
   },
 
   /** Proxy then filter `_all_docs` / view rows by read ACL. */
@@ -921,7 +915,7 @@ export const actors: Record<string, Actor> = {
       ...(query != null ? { query } : {}),
       ...(forwardBody !== undefined ? { body: forwardBody } : {}),
     });
-    if (!upstream.ok) return toClientResponse(upstream);
+    if (!upstream.ok) return toClientResponseFromCouch(upstream, config);
 
     let body: RowsResponse;
     try {
@@ -955,7 +949,7 @@ export const actors: Record<string, Actor> = {
       filteredRows: filtered.rows.length,
       preserveDenied,
     });
-    const response = toClientResponse(upstream, {
+    const response = toClientResponseFromCouch(upstream, config, {
       body: isHead ? null : JSON.stringify(filtered),
       stripHeaders: ["etag", "last-modified"],
     });
@@ -990,7 +984,7 @@ export const actors: Record<string, Actor> = {
     const upstream = await fetchFromCouch(c, config, {
       stripRequestHeaders: ["if-none-match", "if-modified-since"],
     });
-    if (!upstream.ok || !upstream.body) return toClientResponse(upstream);
+    if (!upstream.ok || !upstream.body) return toClientResponseFromCouch(upstream, config);
 
     const filtered = filterChangesStream(
       upstream.body,
@@ -1001,7 +995,7 @@ export const actors: Record<string, Actor> = {
         maxBufferBytes: config.server.maxBodyBytes,
       },
     );
-    const response = toClientResponse(upstream, {
+    const response = toClientResponseFromCouch(upstream, config, {
       body: filtered,
       stripHeaders: ["etag", "last-modified"],
     });
@@ -1070,11 +1064,12 @@ export const actors: Record<string, Actor> = {
       );
     }
 
-    const upstream = await fetchFromCouch(c, c.get("config"), {
+    const config = c.get("config");
+    const upstream = await fetchFromCouch(c, config, {
       body: JSON.stringify({ ...filtered.rest, docs: filtered.allowed }),
       headers: { "Content-Type": "application/json", Accept: "application/json" },
     });
-    if (!upstream.ok) return toClientResponse(upstream);
+    if (!upstream.ok) return toClientResponseFromCouch(upstream, config);
     let results = (await upstream.json()) as Array<Record<string, unknown>>;
     if (!Array.isArray(results)) results = [];
     const newEditsFalse = String(body.new_edits) === "false";
@@ -1091,7 +1086,7 @@ export const actors: Record<string, Actor> = {
       });
     }
     await refreshWrittenDocs(c, state, writes, newEditsFalse);
-    return toClientResponse(upstream, {
+    return toClientResponseFromCouch(upstream, config, {
       body: JSON.stringify(mergeBulkResults(filtered.slots, results)),
     });
   },
@@ -1134,7 +1129,7 @@ export const actors: Record<string, Actor> = {
         "Content-Type": c.req.header("content-type") || "application/json",
       },
     });
-    if (!upstream.ok) return toClientResponse(upstream);
+    if (!upstream.ok) return toClientResponseFromCouch(upstream, config);
     let body: { results?: Array<{ id: string; docs: unknown[] }> };
     try {
       body = JSON.parse(
@@ -1155,7 +1150,7 @@ export const actors: Record<string, Actor> = {
       requested: body.results?.length ?? 0,
       results: filtered.results?.length ?? 0,
     });
-    return toClientResponse(upstream, {
+    return toClientResponseFromCouch(upstream, config, {
       body: JSON.stringify(filtered),
     });
   },
@@ -1194,11 +1189,12 @@ export const actors: Record<string, Actor> = {
       requestedKeys: Object.keys(body).length,
       allowedKeys: Object.keys(filtered).length,
     });
-    const upstream = await fetchFromCouch(c, c.get("config"), {
+    const config = c.get("config");
+    const upstream = await fetchFromCouch(c, config, {
       body: JSON.stringify(filtered),
       headers: { "Content-Type": "application/json", Accept: "application/json" },
     });
-    return toClientResponse(upstream);
+    return toClientResponseFromCouch(upstream, config);
   },
 
   /**
@@ -1207,20 +1203,21 @@ export const actors: Record<string, Actor> = {
    */
   async dblist(c) {
     const principal = c.get("principal");
-    if (principal.admin) return forwardToCouch(c, c.get("config"));
+    const config = c.get("config");
+    if (principal.admin) return forwardToCouch(c, config);
 
     const isHead = c.req.method === "HEAD";
-    const upstream = await fetchFromCouch(c, c.get("config"), {
+    const upstream = await fetchFromCouch(c, config, {
       ...(isHead ? { method: "GET" } : {}),
       stripRequestHeaders: ["if-none-match", "if-modified-since"],
       headers: { Accept: "application/json" },
     });
-    if (!upstream.ok) return toClientResponse(upstream);
+    if (!upstream.ok) return toClientResponseFromCouch(upstream, config);
 
     let dbs: string[];
     try {
       dbs = JSON.parse(
-        await readResponseTextLimited(upstream, c.get("config").server.maxBodyBytes),
+        await readResponseTextLimited(upstream, config.server.maxBodyBytes),
       ) as string[];
     } catch (err) {
       if (err instanceof BodyTooLargeError) {
@@ -1229,7 +1226,7 @@ export const actors: Record<string, Actor> = {
       throw err;
     }
     if (!Array.isArray(dbs)) {
-      return toClientResponse(upstream, {
+      return toClientResponseFromCouch(upstream, config, {
         body: isHead ? null : JSON.stringify(dbs),
         stripHeaders: ["etag", "last-modified"],
       });
@@ -1263,7 +1260,7 @@ export const actors: Record<string, Actor> = {
       visibleDbs: visible.length,
       visible,
     });
-    const response = toClientResponse(upstream, {
+    const response = toClientResponseFromCouch(upstream, config, {
       body: isHead ? null : JSON.stringify(visible),
       stripHeaders: ["etag", "last-modified"],
     });
@@ -1315,7 +1312,7 @@ export const actors: Record<string, Actor> = {
         "Content-Type": c.req.header("content-type") || "application/json",
       },
     });
-    if (!upstream.ok) return toClientResponse(upstream);
+    if (!upstream.ok) return toClientResponseFromCouch(upstream, config);
     let body: FindResponse;
     try {
       body = JSON.parse(
@@ -1340,7 +1337,7 @@ export const actors: Record<string, Actor> = {
     if (injectedId) {
       filtered.docs = filtered.docs.map(({ _id: _injectedId, ...doc }) => doc);
     }
-    return toClientResponse(upstream, { body: JSON.stringify(filtered) });
+    return toClientResponseFromCouch(upstream, config, { body: JSON.stringify(filtered) });
   },
 
   /** Mango index management — admin only. */
