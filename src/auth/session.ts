@@ -12,11 +12,13 @@
 import { createHash } from "node:crypto";
 import type { AppConfig } from "../config.js";
 import { LruMap } from "../util/lru.js";
+import { createLogger, isLevelEnabled } from "../util/log.js";
 import { bearerToken, verifyJwtLocally } from "./jwt.js";
 import { anonymousPrincipal, buildPrincipal } from "./principal.js";
 import type { Principal, SessionInfo } from "./types.js";
 
 type CacheEntry = { principal: Principal; expiresAt: number };
+const log = createLogger("session");
 
 /**
  * Session / principal resolver backed by Couch `/_session`.
@@ -35,24 +37,59 @@ export class SessionResolver {
   async resolve(headers: Headers): Promise<Principal> {
     const auth = headers.get("authorization") ?? "";
     const cookie = headers.get("cookie") ?? "";
-    if (!auth && !cookie) return anonymousPrincipal();
+    if (!auth && !cookie) {
+      if (isLevelEnabled("verbose")) {
+        log.verbose("resolve", { reason: "no-credentials", user: null, admin: false });
+      }
+      return anonymousPrincipal();
+    }
 
     if (!this.config.auth.resolveViaCouchSession) {
-      if (!this.config.auth.jwt.enabled) return anonymousPrincipal();
+      if (!this.config.auth.jwt.enabled) {
+        log.debug("resolve local-jwt disabled; anonymous");
+        return anonymousPrincipal();
+      }
       const token = bearerToken(auth);
-      if (!token) return anonymousPrincipal();
+      if (!token) {
+        if (isLevelEnabled("verbose")) {
+          log.verbose("resolve", { reason: "local-jwt-missing-bearer", user: null });
+        }
+        return anonymousPrincipal();
+      }
       try {
-        return await verifyJwtLocally(token, this.config);
-      } catch {
+        const principal = await verifyJwtLocally(token, this.config);
+        if (isLevelEnabled("verbose")) {
+          log.verbose("resolve", {
+            reason: "local-jwt",
+            user: principal.name,
+            admin: principal.admin,
+            roles: principal.roles,
+            aclTokenCount: principal.aclTokens.length,
+          });
+        }
+        return principal;
+      } catch (err) {
         // Invalid/expired JWTs are anonymous for ACL purposes. Couch will
         // independently reject the forwarded credential.
+        log.debug("resolve local-jwt failed; anonymous", { err: String(err) });
         return anonymousPrincipal();
       }
     }
 
     const cacheKey = hashCreds(auth, cookie);
     const cached = this.cache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) return cached.principal;
+    if (cached && cached.expiresAt > Date.now()) {
+      if (isLevelEnabled("verbose")) {
+        log.verbose("resolve", {
+          reason: "cache-hit",
+          user: cached.principal.name,
+          admin: cached.principal.admin,
+          roles: cached.principal.roles,
+          aclTokenCount: cached.principal.aclTokens.length,
+        });
+      }
+      return cached.principal;
+    }
 
     const upstream = new Headers({ Accept: "application/json" });
     if (auth) upstream.set("Authorization", auth);
@@ -66,6 +103,7 @@ export class SessionResolver {
     if (!res.ok) {
       // Couch returns 401 for bad creds; treat as anonymous for ACL purposes
       // and let upstream reject on proxy if needed.
+      log.debug("resolve couch-session not ok; anonymous", { status: res.status });
       return anonymousPrincipal();
     }
 
@@ -76,6 +114,24 @@ export class SessionResolver {
       this.cache.set(cacheKey, {
         principal,
         expiresAt: Date.now() + this.config.couch.sessionCacheTtlMs,
+      });
+    }
+
+    if (isLevelEnabled("verbose")) {
+      log.verbose("resolve", {
+        reason: "couch-session",
+        user: principal.name,
+        admin: principal.admin,
+        roles: principal.roles,
+        aclTokens: principal.aclTokens,
+        authenticatedBy: principal.authenticatedBy,
+      });
+    } else if (isLevelEnabled("debug")) {
+      log.debug("resolve", {
+        reason: "couch-session",
+        user: principal.name,
+        admin: principal.admin,
+        roleCount: principal.roles.length,
       });
     }
 

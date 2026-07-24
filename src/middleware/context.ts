@@ -10,6 +10,9 @@ import type { AppConfig } from "../config.js";
 import type { AclCache, DbAclState } from "../acl/cache.js";
 import type { SessionResolver } from "../auth/session.js";
 import type { Principal } from "../auth/types.js";
+import { createLogger, isLevelEnabled } from "../util/log.js";
+
+const log = createLogger("context");
 
 /** Hono env typing for couch-auth-proxy request Variables. */
 export type AppEnv = {
@@ -43,6 +46,15 @@ export function withPrincipal() {
     const sessions = c.get("sessions");
     const principal = await sessions.resolve(c.req.raw.headers);
     c.set("principal", principal);
+    if (isLevelEnabled("verbose")) {
+      log.verbose("principal attached", {
+        method: c.req.method,
+        path: c.req.path,
+        user: principal.name,
+        admin: principal.admin,
+        aclTokenCount: principal.aclTokens.length,
+      });
+    }
     await next();
   });
 }

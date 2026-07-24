@@ -18,6 +18,9 @@ import { requestLog } from "./middleware/requestLog.js";
 import { bodyLimit } from "./middleware/bodyLimit.js";
 import { registerRoutes } from "./routes/register.js";
 import { jsonResponse } from "./proxy/forward.js";
+import { createLogger } from "./util/log.js";
+
+const log = createLogger("app");
 
 /** Long-lived dependencies shared across all requests. */
 export type AppServices = {
@@ -113,6 +116,24 @@ export function createApp(services: AppServices): Hono<AppEnv> {
       (s) => s && s.ready && !s.error && (s.noacl || s.followerUp),
     );
     const ready = couchOk && criticalReady;
+    if (!ready) {
+      log.warn("readiness check failed", {
+        couchOk,
+        criticalReady,
+        preload,
+        states: critical.map((s) =>
+          s
+            ? {
+                name: s.name,
+                ready: s.ready,
+                error: s.error,
+                noacl: s.noacl,
+                followerUp: s.followerUp,
+              }
+            : null,
+        ),
+      });
+    }
     return jsonResponse({ ok: ready }, ready ? 200 : 503);
   });
 
@@ -122,9 +143,11 @@ export function createApp(services: AppServices): Hono<AppEnv> {
   // fail-closed and Couch-shaped instead of exposing a generic Hono 500.
   app.onError((err) => {
     if (err instanceof AclUnavailableError) {
+      log.warn("request failed closed on ACL unavailable", { err: err.message });
       return jsonResponse({ error: "service_unavailable", reason: "ACL cache unavailable" }, 503);
     }
     if (err instanceof HTTPException) return err.getResponse();
+    log.error("unhandled request error", { err: String(err) });
     return jsonResponse({ error: "internal_server_error", reason: "Internal server error" }, 500);
   });
 

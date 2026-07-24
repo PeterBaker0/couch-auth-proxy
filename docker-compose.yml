@@ -32,6 +32,7 @@ services:
       AUTH_RESOLVE_VIA_COUCH_SESSION: "true"
       RATE_LIMIT_ENABLED: "false"
       TRUST_PROXY_HOPS: "0"
+      # LOG_LEVEL: verbose   # uncomment to trace ACL allow/deny decisions
     ports:
       - "8000:8000"
     depends_on:

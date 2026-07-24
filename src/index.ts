@@ -9,7 +9,7 @@
 import { serve } from "@hono/node-server";
 import { loadConfig } from "./config.js";
 import { createApp, createServices } from "./app.js";
-import { createLogger } from "./util/log.js";
+import { createLogger, getLogLevel } from "./util/log.js";
 
 const log = createLogger("main");
 const config = loadConfig();
@@ -18,6 +18,13 @@ const app = createApp(services);
 
 /** Start listening and install signal handlers for graceful shutdown. */
 async function boot() {
+  log.info("boot", {
+    logLevel: getLogLevel(),
+    preloadDbs: config.couch.preloadDbs,
+    aclAutoInstall: config.couch.aclAutoInstall,
+    resolveViaCouchSession: config.auth.resolveViaCouchSession,
+  });
+
   if (config.couch.preloadDbs.length) {
     log.info("preloading ACL caches", { dbs: config.couch.preloadDbs });
     await services.aclCache.preload(config.couch.preloadDbs);
@@ -33,6 +40,7 @@ async function boot() {
       log.info("listening", {
         address: `http://${info.address}:${info.port}`,
         couch: config.couch.url,
+        logLevel: getLogLevel(),
       });
     },
   );

@@ -8,8 +8,11 @@
  */
 import * as jose from "jose";
 import type { AppConfig } from "../config.js";
+import { createLogger, isLevelEnabled } from "../util/log.js";
 import { buildPrincipal } from "./principal.js";
 import type { Principal, SessionInfo } from "./types.js";
+
+const log = createLogger("jwt");
 
 /**
  * Verify a Bearer JWT locally and return a Principal.
@@ -45,6 +48,10 @@ export async function verifyJwtLocally(token: string, config: AppConfig): Promis
       authentication_handlers: ["jwt", "cookie", "default"],
     },
   };
+
+  if (isLevelEnabled("verbose")) {
+    log.verbose("verifyJwtLocally", { sub, roles, rolesClaimPath: config.auth.jwt.rolesClaimPath });
+  }
 
   return buildPrincipal(session);
 }
