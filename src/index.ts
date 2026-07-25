@@ -2,13 +2,15 @@
  * Process entrypoint for couch-auth-proxy.
  *
  * Loads config, builds the Hono app + ACL services, optionally preloads ACL
- * caches for configured databases, then serves HTTP until SIGINT/SIGTERM.
+ * caches for configured databases (explicit names and/or `/_all_dbs` patterns),
+ * then serves HTTP until SIGINT/SIGTERM.
  * On shutdown the ACL changes followers are stopped and the server is closed
  * with a forced exit after `shutdownTimeoutMs`.
  */
 import { serve } from "@hono/node-server";
 import { loadConfig } from "./config.js";
 import { createApp, createServices } from "./app.js";
+import { resolvePreloadDbs } from "./acl/preload.js";
 import { createLogger, getLogLevel } from "./util/log.js";
 
 const log = createLogger("main");
@@ -21,15 +23,21 @@ async function boot() {
   log.info("boot", {
     logLevel: getLogLevel(),
     preloadDbs: config.couch.preloadDbs,
+    preloadDbInclude: config.couch.preloadDbInclude,
     aclAutoInstall: config.couch.aclAutoInstall,
     aclRequireCreator: config.couch.aclRequireCreator,
     resolveViaCouchSession: config.auth.resolveViaCouchSession,
     profile: config.server.profile,
   });
 
-  if (config.couch.preloadDbs.length) {
-    log.info("preloading ACL caches", { dbs: config.couch.preloadDbs });
-    await services.aclCache.preload(config.couch.preloadDbs);
+  if (config.couch.preloadDbs.length || config.couch.preloadDbInclude.length) {
+    const dbs = await resolvePreloadDbs(services.aclCache.adminClient, config);
+    log.info("preloading ACL caches", {
+      dbs,
+      explicit: config.couch.preloadDbs,
+      include: config.couch.preloadDbInclude,
+    });
+    await services.aclCache.preload(dbs);
   }
 
   const server = serve(

@@ -124,7 +124,9 @@ export function createApp(services: AppServices): Hono<AppEnv> {
     const config = c.get("config");
     const couchOk = await cache.adminClient.ping();
     const states = [...cache.all()];
-    const preload = config.couch.preloadDbs;
+    // Prefer the resolved boot preload set (explicit ∪ include patterns).
+    // Fall back to configured explicit names when preload() was never called.
+    const preload = cache.getCriticalPreloadDbs() ?? config.couch.preloadDbs;
     // Gate on preloaded DBs (ops-critical). One-off ensures must not flap readiness.
     const critical = preload.length
       ? preload.map((name) => states.find((s) => s.name === name)).filter(Boolean)

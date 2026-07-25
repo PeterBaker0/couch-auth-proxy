@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `COUCH_PRELOAD_DB_INCLUDE`: warm ACL caches at boot by matching exact names or
+  `/regex/flags` against admin `GET /_all_dbs` (same pattern syntax as
+  `ACL_DB_INCLUDE`). Union with `COUCH_PRELOAD_DBS` when both are set; system
+  DBs are skipped from pattern matches; results still honour
+  `ACL_DB_INCLUDE` / `ACL_DB_EXCLUDE`. Empty/unset keeps lazy ensure-on-first-request.
+
 ## [1.5.0] - 2026-07-25
 
 ### Added
