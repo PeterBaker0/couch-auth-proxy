@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-25
+
 ### Added
 
 - `COUCH_PRELOAD_DB_INCLUDE`: warm ACL caches at boot by matching exact names or
