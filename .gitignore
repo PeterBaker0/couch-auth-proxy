@@ -14,6 +14,8 @@ test/perf/last-memory-results.json
 test/perf/last-memory-report.md
 test/perf/last-memory-profile.json
 test/perf/*-results.json
+# Per-variant auth strategy dumps (keep summary.json + docs/auth-strategy-assessment.md)
+test/perf/auth-strategy/*/
 profiles/
 package-lock.json
 npm-debug.log*

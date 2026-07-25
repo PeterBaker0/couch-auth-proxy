@@ -84,7 +84,9 @@ const ConfigSchema = z
       resolveViaCouchSession: boolFromEnv.default(true),
       /**
        * Optional local JWT verification using the same keys Couch trusts.
-       * Only used when resolveViaCouchSession is false, or as a future cache.
+       * When resolveViaCouchSession is false: sole Bearer resolver.
+       * When both are enabled: Bearer fast-path (skip `/_session` RTT);
+       * Basic/Cookie still resolve via Couch.
        */
       jwt: z
         .object({

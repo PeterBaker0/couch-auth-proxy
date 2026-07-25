@@ -1,13 +1,18 @@
 /**
  * Resolve the caller identity the same way CouchDB would.
  *
- * Forwards `Authorization` (Basic / Bearer JWT) and `Cookie` to Couch
- * `GET /_session`, then builds a `Principal` from the response. This is the
- * preferred JWT strategy — Couch validates tokens with its own keys;
- * couch-auth-proxy never forks JWT semantics.
+ * Preferred path: forward `Authorization` (Basic / Bearer JWT) and `Cookie`
+ * to Couch `GET /_session`, then build a `Principal` from the response so
+ * JWT/cookie/basic semantics stay owned by Couch.
  *
- * Results are cached briefly (LRU + TTL, default 5000ms) keyed by a hash of
- * credentials so hot paths avoid a session round-trip on every request.
+ * Optional fast path: when `JWT_LOCAL_VERIFY=true` and the request carries a
+ * Bearer token, verify HS256 locally with the same secret Couch trusts
+ * (`JWT_HMAC_SECRET`). With `AUTH_RESOLVE_VIA_COUCH_SESSION=true` this skips
+ * the `/_session` RTT for Bearer clients only (Basic/Cookie still use Couch).
+ * With session resolve disabled, Bearer local-verify is the sole resolver.
+ *
+ * Couch `/_session` results (and successful local JWT principals) are cached
+ * briefly (LRU + TTL, default 5000ms) keyed by a hash of credentials.
  * Concurrent identical lookups also coalesce in-flight. Set
  * `SESSION_CACHE_TTL_MS=0` to re-resolve on every request.
  */
@@ -51,7 +56,8 @@ export class SessionResolver {
 
   /**
    * Resolve identity from incoming request headers.
-   * Missing credentials → anonymous. Couch 401 → anonymous (upstream may still reject).
+   * Missing credentials → anonymous. Couch 401 / invalid JWT → anonymous
+   * (upstream may still reject the forwarded credential).
    */
   async resolve(headers: Headers): Promise<Principal> {
     const auth = headers.get("authorization") ?? "";
@@ -61,38 +67,6 @@ export class SessionResolver {
         log.verbose("resolve", { reason: "no-credentials", user: null, admin: false });
       }
       return anonymousPrincipal();
-    }
-
-    if (!this.config.auth.resolveViaCouchSession) {
-      if (!this.config.auth.jwt.enabled) {
-        log.debug("resolve local-jwt disabled; anonymous");
-        return anonymousPrincipal();
-      }
-      const token = bearerToken(auth);
-      if (!token) {
-        if (isLevelEnabled("verbose")) {
-          log.verbose("resolve", { reason: "local-jwt-missing-bearer", user: null });
-        }
-        return anonymousPrincipal();
-      }
-      try {
-        const principal = await verifyJwtLocally(token, this.config);
-        if (isLevelEnabled("verbose")) {
-          log.verbose("resolve", {
-            reason: "local-jwt",
-            user: principal.name,
-            admin: principal.admin,
-            roles: principal.roles,
-            aclTokenCount: principal.aclTokens.length,
-          });
-        }
-        return principal;
-      } catch (err) {
-        // Invalid/expired JWTs are anonymous for ACL purposes. Couch will
-        // independently reject the forwarded credential.
-        log.debug("resolve local-jwt failed; anonymous", { err: String(err) });
-        return anonymousPrincipal();
-      }
     }
 
     const cacheKey = hashCreds(auth, cookie);
@@ -108,6 +82,43 @@ export class SessionResolver {
         });
       }
       return cached.principal;
+    }
+
+    // Bearer + local verify: skip Couch `/_session` when keys match Couch.
+    // Used as sole resolver when session resolve is off, or as a Bearer
+    // fast-path when both are enabled (Basic/Cookie still hit Couch).
+    if (this.config.auth.jwt.enabled) {
+      const token = bearerToken(auth);
+      if (token) {
+        try {
+          const principal = await verifyJwtLocally(token, this.config);
+          this.storeCache(cacheKey, principal);
+          if (isLevelEnabled("verbose")) {
+            log.verbose("resolve", {
+              reason: "local-jwt",
+              user: principal.name,
+              admin: principal.admin,
+              roles: principal.roles,
+              aclTokenCount: principal.aclTokens.length,
+            });
+          }
+          return principal;
+        } catch (err) {
+          // Invalid/expired JWTs are anonymous for ACL purposes. Couch will
+          // independently reject the forwarded credential on the upstream hop.
+          log.debug("resolve local-jwt failed; anonymous", { err: String(err) });
+          return anonymousPrincipal();
+        }
+      }
+      if (!this.config.auth.resolveViaCouchSession) {
+        if (isLevelEnabled("verbose")) {
+          log.verbose("resolve", { reason: "local-jwt-missing-bearer", user: null });
+        }
+        return anonymousPrincipal();
+      }
+    } else if (!this.config.auth.resolveViaCouchSession) {
+      log.debug("resolve local-jwt disabled; anonymous");
+      return anonymousPrincipal();
     }
 
     const pending = this.inflight.get(cacheKey);
@@ -126,6 +137,16 @@ export class SessionResolver {
     });
     this.inflight.set(cacheKey, lookup);
     return lookup;
+  }
+
+  /** Store a principal when `SESSION_CACHE_TTL_MS > 0`. */
+  private storeCache(cacheKey: string, principal: Principal): void {
+    if (this.config.couch.sessionCacheTtlMs > 0) {
+      this.cache.set(cacheKey, {
+        principal,
+        expiresAt: Date.now() + this.config.couch.sessionCacheTtlMs,
+      });
+    }
   }
 
   /** One Couch `/_session` fetch + optional TTL cache store. */
@@ -152,13 +173,7 @@ export class SessionResolver {
 
     const body = (await res.json()) as SessionInfo;
     const principal = buildPrincipal(body);
-
-    if (this.config.couch.sessionCacheTtlMs > 0) {
-      this.cache.set(cacheKey, {
-        principal,
-        expiresAt: Date.now() + this.config.couch.sessionCacheTtlMs,
-      });
-    }
+    this.storeCache(cacheKey, principal);
 
     if (isLevelEnabled("verbose")) {
       log.verbose("resolve", {

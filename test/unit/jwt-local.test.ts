@@ -47,6 +47,69 @@ describe("local JWT authentication", () => {
     couchFetch.mockRestore();
   });
 
+  it("skips Couch /_session for Bearer when local verify is enabled alongside session resolve", async () => {
+    const config = loadConfig({
+      COUCH_URL: "http://127.0.0.1:5984",
+      AUTH_RESOLVE_VIA_COUCH_SESSION: "true",
+      JWT_LOCAL_VERIFY: "true",
+      JWT_HMAC_SECRET: SECRET,
+      RATE_LIMIT_ENABLED: "false",
+    });
+    const resolver = new SessionResolver(config);
+    const couchFetch = vi.spyOn(globalThis, "fetch");
+    const principal = await resolver.resolve(
+      new Headers({ Authorization: `Bearer ${await token("carol", ["readers"])}` }),
+    );
+
+    expect(principal.name).toBe("carol");
+    expect(principal.roles).toEqual(["readers"]);
+    expect(couchFetch).not.toHaveBeenCalled();
+    couchFetch.mockRestore();
+  });
+
+  it("still uses Couch /_session for Basic when hybrid local JWT is enabled", async () => {
+    const config = loadConfig({
+      COUCH_URL: "http://127.0.0.1:5984",
+      AUTH_RESOLVE_VIA_COUCH_SESSION: "true",
+      JWT_LOCAL_VERIFY: "true",
+      JWT_HMAC_SECRET: SECRET,
+      RATE_LIMIT_ENABLED: "false",
+      SESSION_CACHE_TTL_MS: "0",
+    });
+    const couchFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, userCtx: { name: "bob", roles: ["writers"] } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const resolver = new SessionResolver(config);
+    const principal = await resolver.resolve(
+      new Headers({ Authorization: "Basic Ym9iOmJvYi1wYXNz" }),
+    );
+
+    expect(principal.name).toBe("bob");
+    expect(couchFetch).toHaveBeenCalledTimes(1);
+    couchFetch.mockRestore();
+  });
+
+  it("caches local JWT principals under SESSION_CACHE_TTL_MS", async () => {
+    const config = loadConfig({
+      COUCH_URL: "http://127.0.0.1:5984",
+      AUTH_RESOLVE_VIA_COUCH_SESSION: "false",
+      JWT_LOCAL_VERIFY: "true",
+      JWT_HMAC_SECRET: SECRET,
+      RATE_LIMIT_ENABLED: "false",
+    });
+    expect(config.couch.sessionCacheTtlMs).toBe(5000);
+    const resolver = new SessionResolver(config);
+    const headers = new Headers({ Authorization: `Bearer ${await token("alice", ["readers"])}` });
+
+    expect((await resolver.resolve(headers)).name).toBe("alice");
+    expect(resolver.resourceStats().sessionCacheEntries).toBe(1);
+    expect((await resolver.resolve(headers)).name).toBe("alice");
+    expect(resolver.resourceStats().sessionCacheEntries).toBe(1);
+  });
+
   it("fails closed to anonymous for invalid tokens", async () => {
     const resolver = new SessionResolver(localConfig());
     const principal = await resolver.resolve(

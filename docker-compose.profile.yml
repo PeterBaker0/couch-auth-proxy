@@ -3,6 +3,12 @@
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.profile.yml up -d --build
 #   pnpm test:perf:profile
 #   pnpm test:perf:memory
+#   bash scripts/perf-auth-strategies.sh
+#
+# Auth-strategy knobs (host env → proxy). Defaults match production-ish compose:
+#   SESSION_CACHE_TTL_MS=0|1000|5000|30000
+#   AUTH_RESOLVE_VIA_COUCH_SESSION=true|false
+#   JWT_LOCAL_VERIFY=true|false
 services:
   couch-auth-proxy:
     environment:
@@ -10,7 +16,10 @@ services:
       # Expose V8 GC for optional POST /_couch-auth-proxy/profile/gc samples used
       # by the memory-stability soak. Harmless when unused; still opt-in via this overlay.
       NODE_OPTIONS: "--expose-gc"
-      # Session principal cache defaults to 5000ms in the app. Override here to
-      # attribute auth vs ACL under an alternate TTL (0 = re-resolve every request).
-      # SESSION_CACHE_TTL_MS: "0"
-      # SESSION_CACHE_MAX: "1000"
+      # Session principal cache (default 5000ms). 0 = re-resolve every request.
+      SESSION_CACHE_TTL_MS: ${SESSION_CACHE_TTL_MS:-5000}
+      SESSION_CACHE_MAX: ${SESSION_CACHE_MAX:-10000}
+      # Override base compose so auth-strategy benchmarks can flip resolvers.
+      AUTH_RESOLVE_VIA_COUCH_SESSION: ${AUTH_RESOLVE_VIA_COUCH_SESSION:-true}
+      JWT_LOCAL_VERIFY: ${JWT_LOCAL_VERIFY:-false}
+      JWT_HMAC_SECRET: ${JWT_HMAC_SECRET:-couch-auth-proxy-dev-secret}

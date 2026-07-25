@@ -1,10 +1,13 @@
 /**
  * Optional local JWT verification (HS256).
  *
- * Prefer `SessionResolver` (Couch `GET /_session`) for production parity —
- * Couch validates Bearer tokens with its `[jwt_keys]` / `[jwt_auth]` config
- * and couch-auth-proxy never forks JWT semantics. Use this helper only when keys are
- * guaranteed identical to Couch and a round-trip must be avoided (or in tests).
+ * Prefer Couch `GET /_session` for production parity when clients may use
+ * Basic/Cookie — Couch owns those handlers. Use this helper when:
+ * - `AUTH_RESOLVE_VIA_COUCH_SESSION=false` (Bearer-only deployments), or
+ * - both flags are on and Bearer tokens should skip the `/_session` RTT
+ *   (keys must match Couch `[jwt_keys]` / `[jwt_auth]`).
+ *
+ * Upstream Couch still independently validates the forwarded Bearer token.
  */
 import * as jose from "jose";
 import type { AppConfig } from "../config.js";

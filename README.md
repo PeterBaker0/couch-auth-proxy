@@ -63,6 +63,12 @@ JWTs locally instead, set `AUTH_RESOLVE_VIA_COUCH_SESSION=false`,
 only; invalid tokens fail closed as anonymous, and Couch still independently
 validates the forwarded token.
 
+Hybrid (recommended when most clients are JWT but Basic/Cookie still matter):
+keep `AUTH_RESOLVE_VIA_COUCH_SESSION=true` and also set `JWT_LOCAL_VERIFY=true`
+with a matching `JWT_HMAC_SECRET`. Bearer tokens skip the `/_session` RTT;
+Basic/Cookie still resolve via Couch. See `docs/auth-strategy-assessment.md`
+and `pnpm test:perf:auth` for measured trade-offs.
+
 ```bash
 # mint a token (Node), then:
 curl -s http://127.0.0.1:8000/_session -H "Authorization: Bearer <jwt>"
@@ -216,6 +222,7 @@ pnpm test:perf                # writes test/perf/last-results.json; not in CI
 
 # Same harness + server phase profiling (auth/acl/upstream/filter)
 pnpm test:perf:profile        # compose profile overlay + scrape /_couch-auth-proxy/profile
+pnpm test:perf:auth           # compare session TTL / hybrid JWT / local JWT (writes docs/auth-strategy-assessment.md)
 # Host CPU profile (after pnpm build; Couch on :5985 via docker:up:dev):
 #   PROFILE=true pnpm start:profile   # writes CPU profiles under ./profiles/
 
