@@ -15,7 +15,7 @@
  */
 import type { AppConfig } from "../config.js";
 import type { AclRow, DbAclOverlay, RestrictMap } from "./types.js";
-import { ACL_MAP_SOURCE, buildAclDesignDoc } from "./ddoc.js";
+import { ACL_MAP_SOURCE, REQUIRE_CREATOR_FORBIDDEN, buildAclDesignDoc } from "./ddoc.js";
 import { aclRowFromDoc } from "./resolve.js";
 import { AdminClient } from "../couch/adminClient.js";
 import { ChangesFollower, fetchAclRow, fetchAclRows, fetchUpdateSeq } from "./changesFollower.js";
@@ -547,13 +547,18 @@ export class AclCache {
       const put = await this.admin.fetch(`/${encodeURIComponent(db)}/_design/acl`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildAclDesignDoc()),
+        body: JSON.stringify(
+          buildAclDesignDoc({ requireCreator: this.config.couch.aclRequireCreator }),
+        ),
       });
       if (!put.ok) {
         const text = await put.text();
         throw new Error(`Failed to install _design/acl in ${db}: ${put.status} ${text}`);
       }
-      log.info("installed _design/acl", { db });
+      log.info("installed _design/acl", {
+        db,
+        requireCreator: this.config.couch.aclRequireCreator,
+      });
       return { kind: "present" };
     }
     if (get.status === 401 || get.status === 403) {
@@ -568,6 +573,8 @@ export class AclCache {
    * grants from parent/dbacl; older versions also used `_local_seq`. v2.1 did
    * not recognize role owners and allowed non-creators to retarget `parent`.
    * v2.2 allowed a writer to claim `creator` on an existing creator-less doc.
+   * v2.4 bakes optional `ACL_REQUIRE_CREATOR` into the VDU; flipping the flag
+   * rewrites generated VDUs so creates match the process config.
    */
   private async maybeMigrateStamp(db: string, getRes: Response): Promise<void> {
     const ddoc = (await getRes.json()) as {
@@ -610,17 +617,28 @@ export class AclCache {
       version.startsWith("2.2.") &&
       !looksLikeGeneratedAclMap &&
       /if \(odc && odc != ndc\)/.test(validateSrc);
+    const looksLikeGeneratedVdu =
+      /Creator can not be changed\./.test(validateSrc) &&
+      /Can't create doc on behalf of other user\./.test(validateSrc);
+    const hasRequireCreatorRule = validateSrc.includes(REQUIRE_CREATOR_FORBIDDEN);
+    const needsRequireCreatorRewrite =
+      generatedShape &&
+      looksLikeGeneratedVdu &&
+      this.config.couch.aclRequireCreator !== hasRequireCreatorRule;
     if (
       !needsLegacyRewrite &&
       !needsOwnerPolicyRewrite &&
       !needsCreatorPolicyRewrite &&
       !needsV22FullPolicyRewrite &&
+      !needsRequireCreatorRewrite &&
       !needsGlobalViewOption
     ) {
       return;
     }
 
-    const generated = buildAclDesignDoc();
+    const generated = buildAclDesignDoc({
+      requireCreator: this.config.couch.aclRequireCreator,
+    });
     const next =
       needsLegacyRewrite || needsV21FullPolicyRewrite || needsV22FullPolicyRewrite
         ? {
@@ -635,7 +653,7 @@ export class AclCache {
             views: { ...ddoc.views, acl: generated.views.acl },
             validate_doc_update: generated.validate_doc_update,
           }
-        : needsOwnerPolicyRewrite || needsCreatorPolicyRewrite
+        : needsOwnerPolicyRewrite || needsCreatorPolicyRewrite || needsRequireCreatorRewrite
           ? {
               ...ddoc,
               _id: ddoc._id ?? generated._id,

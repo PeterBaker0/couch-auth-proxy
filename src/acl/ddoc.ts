@@ -14,8 +14,27 @@
  * Map / VDU sources are kept as strings so they upload to CouchDB unchanged.
  */
 
+/** Ddoc version when `ACL_REQUIRE_CREATOR` is off (historical create semantics). */
+export const ACL_DDOC_VERSION_DEFAULT = "2.3.0";
+/**
+ * Ddoc version when `ACL_REQUIRE_CREATOR` is on. Bumped so ensure/migrate
+ * rewrites the VDU when the flag flips.
+ */
+export const ACL_DDOC_VERSION_REQUIRE_CREATOR = "2.4.0";
+
+export type BuildAclDesignDocOptions = {
+  /** When true, VDU rejects non-admin creates that omit `creator`. */
+  requireCreator?: boolean;
+  /** Override generated `version` (tests / migrations). */
+  version?: string;
+};
+
 /** Build a fresh `_design/acl` document (no `_rev`; caller supplies on update). */
-export function buildAclDesignDoc(version = "2.3.0") {
+export function buildAclDesignDoc(options: BuildAclDesignDocOptions = {}) {
+  const requireCreator = options.requireCreator === true;
+  const version =
+    options.version ??
+    (requireCreator ? ACL_DDOC_VERSION_REQUIRE_CREATOR : ACL_DDOC_VERSION_DEFAULT);
   return {
     _id: "_design/acl",
     language: "javascript",
@@ -34,7 +53,7 @@ export function buildAclDesignDoc(version = "2.3.0") {
         map: ACL_MAP_SOURCE,
       },
     },
-    validate_doc_update: VALIDATE_DOC_UPDATE_SOURCE,
+    validate_doc_update: buildValidateDocUpdateSource(requireCreator),
   };
 }
 
@@ -92,12 +111,27 @@ export const ACL_MAP_SOURCE = `function (doc) {
   emit(doc._id, r);
 }`;
 
+/** Marker string present only in require-creator VDU bodies (migration sniff). */
+export const REQUIRE_CREATOR_FORBIDDEN = "Document must have a creator.";
+
 /**
- * Couch `validate_doc_update` source: non-admins cannot forge creator or
- * change owners/acl without standing. Delete authorization belongs to the
- * proxy because parent and dbacl grants are unavailable to Couch's VDU.
+ * Build Couch `validate_doc_update` source.
+ *
+ * When `requireCreator` is true, non-admin creates of non-`_design` docs must
+ * include a non-empty `creator`. Existing creator-less docs remain readable as
+ * `r-*` via the map; this flag only blocks new unstamped creates.
  */
-export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
+export function buildValidateDocUpdateSource(requireCreator = false): string {
+  const requireCreatorCheck = requireCreator
+    ? `
+      if (!/^_design/.test(nd._id || "")) {
+        if (typeof nd.creator != S || !nd.creator)
+          throw { forbidden: "${REQUIRE_CREATOR_FORBIDDEN}" };
+      }
+`
+    : "";
+
+  return `function (nd, od, userCtx, secObj) {
   var roles = userCtx.roles || [];
   var adm = !!(roles.indexOf("_admin") >= 0);
   var u = userCtx.name;
@@ -138,7 +172,7 @@ export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
     }
 
     if (!od) {
-      if (has(nd, "creator") && nd.creator != u && nd.creator != uu)
+${requireCreatorCheck}      if (has(nd, "creator") && nd.creator != u && nd.creator != uu)
         throw { forbidden: "Can't create doc on behalf of other user." };
     } else {
       var odc = od.creator;
@@ -171,3 +205,10 @@ export const VALIDATE_DOC_UPDATE_SOURCE = `function (nd, od, userCtx, secObj) {
     }
   }
 }`;
+}
+
+/**
+ * Default VDU source (`ACL_REQUIRE_CREATOR` off). Kept as a constant so unit
+ * tests can assert the historical create semantics are unchanged.
+ */
+export const VALIDATE_DOC_UPDATE_SOURCE = buildValidateDocUpdateSource(false);
