@@ -22,6 +22,7 @@ async function boot() {
     logLevel: getLogLevel(),
     preloadDbs: config.couch.preloadDbs,
     aclAutoInstall: config.couch.aclAutoInstall,
+    aclRequireCreator: config.couch.aclRequireCreator,
     resolveViaCouchSession: config.auth.resolveViaCouchSession,
     profile: config.server.profile,
   });

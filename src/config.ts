@@ -6,6 +6,7 @@
  *
  * Notable knobs:
  * - `ACL_AUTO_INSTALL` — whether missing `_design/acl` is installed on app DBs
+ * - `ACL_REQUIRE_CREATOR` — bake require-creator into installed `_design/acl` VDU
  * - `ACL_DB_INCLUDE` / `ACL_DB_EXCLUDE` — opt-in database allow/deny lists
  * - `ACL_ROUTE_INCLUDE` / `ACL_ROUTE_EXCLUDE` — opt-in API surface allow/deny lists
  * - `AUTH_RESOLVE_VIA_COUCH_SESSION` — forward creds to Couch `/_session` (preferred)
@@ -67,6 +68,13 @@ const ConfigSchema = z
        * Set false in production if ddocs are provisioned out-of-band.
        */
       aclAutoInstall: boolFromEnv.default(true),
+      /**
+       * When true, installed/migrated `_design/acl` `validate_doc_update`
+       * rejects non-admin creates that omit a non-empty `creator`
+       * (`_design/*` exempt). Default false preserves historical open-create
+       * semantics. Flipping the flag bumps the ddoc version so ensure rewrites.
+       */
+      aclRequireCreator: boolFromEnv.default(false),
     }),
     auth: z.object({
       /**
@@ -212,6 +220,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       sessionCacheMaxEntries: env.SESSION_CACHE_MAX ?? 10_000,
       preloadDbs: splitCsv(env.COUCH_PRELOAD_DBS),
       aclAutoInstall: env.ACL_AUTO_INSTALL ?? true,
+      aclRequireCreator: env.ACL_REQUIRE_CREATOR ?? false,
     },
     auth: {
       resolveViaCouchSession: env.AUTH_RESOLVE_VIA_COUCH_SESSION ?? true,

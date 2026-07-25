@@ -153,6 +153,15 @@ These are ordinary JSON fields—not a separate doc type. The `_design/acl` map 
 
 ACL fields are type-checked: `creator` must be a non-empty string, `acl` / `owners` must be arrays of non-empty strings, and `parent` must be a string. Malformed present fields are rejected and index fail-closed. Non-admins cannot add a creator or an empty grant field to an existing open document.
 
+#### Opt-in: require `creator` on create (`ACL_REQUIRE_CREATOR`)
+
+Set `ACL_REQUIRE_CREATOR=true` when clients must not create unstamped docs (docs that become world-open to every DB member via `r-*`). The proxy bakes this into Couch `_design/acl` `validate_doc_update` on ensure/install:
+
+- Non-admin creates of non-`_design/*` docs without a non-empty `creator` are **forbidden**.
+- `_admin` and `_design/*` are exempt.
+- Already-written unstamped docs stay `r-*` on the map; the flag only blocks **new** holes.
+- Default is `false` (historical create semantics). Flipping the flag bumps the ddoc version so the next ensure rewrites the VDU.
+
 ### Design documents
 
 | Doc                   | Role                                                                                                                                                                                                   |
@@ -185,7 +194,7 @@ For a non-admin principal matching the listed grant:
 | via `parent` only                | union of parent’s grants     | same           | same   | —            | —                                            |
 | via `dbacl` overlay              | extra flags on **every** doc | same           | same   | —            | —                                            |
 
-Server admins always pass. Couch `validate_doc_update` on `_design/acl` also blocks forging `creator` on create and illegal ownership/acl edits. Delete authorization remains in the proxy because Couch's validation function cannot load a parent ACL or the ddoc's `dbacl` overlay.
+Server admins always pass. Couch `validate_doc_update` on `_design/acl` also blocks forging `creator` on create and illegal ownership/acl edits. With `ACL_REQUIRE_CREATOR=true`, it additionally rejects creates that omit `creator`. Delete authorization remains in the proxy because Couch's validation function cannot load a parent ACL or the ddoc's `dbacl` overlay.
 
 ---
 
@@ -268,7 +277,7 @@ On create (PUT/POST/`_bulk_docs`/Pouch `put`):
 - Shared edit: `"owners": ["u-bob"]` (still cannot delete; only creator can).
 - Hierarchy: child docs with `"parent": "folder-1"` inherit the folder’s grants (union).
 
-Omit `creator`/`owners`/`acl` only when you intentionally want **any authenticated member** to fully control the doc.
+Omit `creator`/`owners`/`acl` only when you intentionally want **any authenticated member** to fully control the doc. If your app relies on per-document ownership, set `ACL_REQUIRE_CREATOR=true` so unstamped creates are rejected at the Couch VDU.
 
 ### 4. Share by updating grants, not by copying data
 
