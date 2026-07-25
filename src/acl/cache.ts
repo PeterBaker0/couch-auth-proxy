@@ -89,6 +89,11 @@ export class AclCache {
   private readonly inflight = new Map<string, Promise<DbAclState>>();
   /** Coalesce concurrent single-doc refreshes (`db\\0docId`). */
   private readonly refreshInflight = new Map<string, Promise<void>>();
+  /**
+   * DBs resolved for boot preload (`COUCH_PRELOAD_DBS` ∪ include patterns).
+   * Readiness gates on these when non-empty; null means preload was never run.
+   */
+  private criticalPreloadDbs: string[] | null = null;
   private stopped = false;
 
   constructor(private readonly config: AppConfig) {
@@ -98,6 +103,14 @@ export class AclCache {
   /** Admin client used by readiness probes and tests. */
   get adminClient(): AdminClient {
     return this.admin;
+  }
+
+  /**
+   * Boot-critical DB names for `/_couch-auth-proxy/ready`.
+   * Empty array / null → probe does not require a fixed preload inventory.
+   */
+  getCriticalPreloadDbs(): string[] | null {
+    return this.criticalPreloadDbs;
   }
 
   /** Return cached state if present (may be incomplete / not ready). */
@@ -234,6 +247,7 @@ export class AclCache {
 
   /** Warm caches for configured DBs at boot (errors logged, not thrown). */
   async preload(dbs: string[]): Promise<void> {
+    this.criticalPreloadDbs = [...dbs];
     await Promise.all(
       dbs.map(async (db) => {
         try {

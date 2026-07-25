@@ -9,6 +9,7 @@
  * - `ACL_REQUIRE_CREATOR` — bake require-creator into installed `_design/acl` VDU
  * - `ACL_DB_INCLUDE` / `ACL_DB_EXCLUDE` — opt-in database allow/deny lists
  * - `ACL_ROUTE_INCLUDE` / `ACL_ROUTE_EXCLUDE` — opt-in API surface allow/deny lists
+ * - `COUCH_PRELOAD_DBS` / `COUCH_PRELOAD_DB_INCLUDE` — warm ACL caches at boot
  * - `AUTH_RESOLVE_VIA_COUCH_SESSION` — forward creds to Couch `/_session` (preferred)
  * - `TRUST_PROXY_HOPS` — how many reverse-proxy hops to trust for client IP
  */
@@ -62,6 +63,11 @@ const ConfigSchema = z
       /** Max hashed session-cache entries (LRU). */
       sessionCacheMaxEntries: z.coerce.number().int().positive().default(10_000),
       preloadDbs: z.array(z.string()).default([]),
+      /**
+       * Opt-in DB name patterns (exact or `/regex/flags`) matched against
+       * Couch `GET /_all_dbs` at boot. Unioned with `preloadDbs` when both set.
+       */
+      preloadDbInclude: z.array(z.string()).default([]),
       /**
        * When true, missing `_design/acl` on app DBs is auto-installed.
        * System DBs (`_users`, etc.) are never auto-installed.
@@ -134,6 +140,15 @@ const ConfigSchema = z
         code: z.ZodIssueCode.custom,
         path: ["auth", "jwt", "hmacSecret"],
         message: "JWT_HMAC_SECRET is required when JWT_LOCAL_VERIFY is enabled",
+      });
+    }
+    try {
+      assertDbPatterns(config.couch.preloadDbInclude, "COUCH_PRELOAD_DB_INCLUDE");
+    } catch (err) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["couch", "preloadDbInclude"],
+        message: err instanceof Error ? err.message : String(err),
       });
     }
     try {
@@ -219,6 +234,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       sessionCacheTtlMs: env.SESSION_CACHE_TTL_MS ?? 5000,
       sessionCacheMaxEntries: env.SESSION_CACHE_MAX ?? 10_000,
       preloadDbs: splitCsv(env.COUCH_PRELOAD_DBS),
+      preloadDbInclude: splitCsv(env.COUCH_PRELOAD_DB_INCLUDE),
       aclAutoInstall: env.ACL_AUTO_INSTALL ?? true,
       aclRequireCreator: env.ACL_REQUIRE_CREATOR ?? false,
     },
