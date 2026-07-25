@@ -1,0 +1,377 @@
+{
+  "at": "2026-07-25T02:35:37.210Z",
+  "harness": {
+    "clients": 6,
+    "seedDocs": 300,
+    "rounds": 3,
+    "docsPerRound": 8,
+    "httpOps": 60
+  },
+  "note": "Principal cache TTL is SESSION_CACHE_TTL_MS (not an ACL TTL). ACL rows are changes-fed, not time-expired.",
+  "variants": [
+    {
+      "name": "ttl0",
+      "sessionCacheTtlMs": 0,
+      "resolveViaCouchSession": true,
+      "jwtLocalVerify": false,
+      "notes": "Couch /_session every request (no principal cache)",
+      "overallOpsPerSec": 245.7196664260477,
+      "syncOpsPerSec": 46.49810124486921,
+      "httpOpsPerSec": 537.5202802668967,
+      "bulkGetOpsPerSec": 490.5175163498525,
+      "proxyOverDirectRatio": 0.45065219814170576,
+      "overheadPct": 54.934780185829425,
+      "authHttp": {
+        "count": 360,
+        "meanMs": 1.9662689555555795,
+        "maxMs": 4.590677000000142,
+        "perRequestMeanMs": 1.9662689555555795,
+        "share": 0.26216919407407724
+      },
+      "authSync": {
+        "count": 584,
+        "meanMs": 2.328523851027385,
+        "maxMs": 10.34972900000048,
+        "perRequestMeanMs": 2.328523851027385,
+        "share": 0.25285569523986484
+      },
+      "upstreamHttp": {
+        "count": 288,
+        "meanMs": 5.1406970486111,
+        "maxMs": 19.546198000000004,
+        "perRequestMeanMs": 4.11255763888888,
+        "share": 0.5483410185185174
+      },
+      "meanDurationHttp": 7.5,
+      "authShareHttp": 0.26216919407407724,
+      "upstreamShareHttp": 0.5483410185185174,
+      "endProfileAuth": {
+        "count": 73,
+        "meanMs": 2.371059506849384,
+        "maxMs": 8.105405999999675,
+        "perRequestMeanMs": 2.371059506849384,
+        "share": 0.276056370015957
+      },
+      "endProfileUpstream": {
+        "count": 73,
+        "meanMs": 5.505017726027377,
+        "maxMs": 11.34242600000016,
+        "perRequestMeanMs": 5.505017726027377,
+        "share": 0.640935078149918
+      },
+      "sessionCacheEntries": 0
+    },
+    {
+      "name": "ttl1k",
+      "sessionCacheTtlMs": 1000,
+      "resolveViaCouchSession": true,
+      "jwtLocalVerify": false,
+      "notes": "Couch /_session + 1s principal cache",
+      "overallOpsPerSec": 277.6422990949346,
+      "syncOpsPerSec": 50.39173183886114,
+      "httpOpsPerSec": 658.0122386840105,
+      "bulkGetOpsPerSec": 546.5016674904425,
+      "proxyOverDirectRatio": 0.5586219466098145,
+      "overheadPct": 44.137805339018556,
+      "authHttp": {
+        "count": 360,
+        "meanMs": 0.02780729166668405,
+        "maxMs": 2.0366890000004787,
+        "perRequestMeanMs": 0.02780729166668405,
+        "share": 0.004868981031131449
+      },
+      "authSync": {
+        "count": 599,
+        "meanMs": 0.10071441068447816,
+        "maxMs": 10.089092000000164,
+        "perRequestMeanMs": 0.10071441068447816,
+        "share": 0.014319471160693667
+      },
+      "upstreamHttp": {
+        "count": 288,
+        "meanMs": 5.290292402777788,
+        "maxMs": 15.707532000000356,
+        "perRequestMeanMs": 4.23223392222223,
+        "share": 0.7410526322957212
+      },
+      "meanDurationHttp": 5.711111111111111,
+      "authShareHttp": 0.004868981031131449,
+      "upstreamShareHttp": 0.7410526322957212,
+      "endProfileAuth": {
+        "count": 73,
+        "meanMs": 0.04667500000004397,
+        "maxMs": 2.1818670000002385,
+        "perRequestMeanMs": 0.04667500000004397,
+        "share": 0.006309768518524462
+      },
+      "endProfileUpstream": {
+        "count": 73,
+        "meanMs": 6.701564328767122,
+        "maxMs": 15.911911999999575,
+        "perRequestMeanMs": 6.701564328767122,
+        "share": 0.9059522148148147
+      },
+      "sessionCacheEntries": 5
+    },
+    {
+      "name": "ttl5k",
+      "sessionCacheTtlMs": 5000,
+      "resolveViaCouchSession": true,
+      "jwtLocalVerify": false,
+      "notes": "Keep-as-is: Couch /_session + default 5s cache",
+      "overallOpsPerSec": 287.2743044204806,
+      "syncOpsPerSec": 53.22038018558096,
+      "httpOpsPerSec": 649.65588566875,
+      "bulkGetOpsPerSec": 585.4874779719494,
+      "proxyOverDirectRatio": 0.522641297127917,
+      "overheadPct": 47.73587028720831,
+      "authHttp": {
+        "count": 360,
+        "meanMs": 0.01900438611112602,
+        "maxMs": 0.5868289999998524,
+        "perRequestMeanMs": 0.01900438611112602,
+        "share": 0.0033179335596534272
+      },
+      "authSync": {
+        "count": 587,
+        "meanMs": 0.03823473594545188,
+        "maxMs": 4.707155000000057,
+        "perRequestMeanMs": 0.03823473594545188,
+        "share": 0.0054888212276792015
+      },
+      "upstreamHttp": {
+        "count": 288,
+        "meanMs": 5.386663399305551,
+        "maxMs": 17.363460999999916,
+        "perRequestMeanMs": 4.30933071944444,
+        "share": 0.7523564786614929
+      },
+      "meanDurationHttp": 5.727777777777778,
+      "authShareHttp": 0.0033179335596534272,
+      "upstreamShareHttp": 0.7523564786614929,
+      "endProfileAuth": {
+        "count": 73,
+        "meanMs": 0.016006191780758093,
+        "maxMs": 0.05975200000011682,
+        "perRequestMeanMs": 0.016006191780758093,
+        "share": 0.0023557499999906067
+      },
+      "endProfileUpstream": {
+        "count": 73,
+        "meanMs": 6.218924520547897,
+        "maxMs": 19.893677000000025,
+        "perRequestMeanMs": 6.218924520547897,
+        "share": 0.9152852620967671
+      },
+      "sessionCacheEntries": 5
+    },
+    {
+      "name": "ttl30k",
+      "sessionCacheTtlMs": 30000,
+      "resolveViaCouchSession": true,
+      "jwtLocalVerify": false,
+      "notes": "Couch /_session + 30s principal cache",
+      "overallOpsPerSec": 292.2026456323347,
+      "syncOpsPerSec": 54.19810659938338,
+      "httpOpsPerSec": 666.7567936641483,
+      "bulkGetOpsPerSec": 567.1188373421113,
+      "proxyOverDirectRatio": 0.5767840614796291,
+      "overheadPct": 42.32159385203709,
+      "authHttp": {
+        "count": 360,
+        "meanMs": 0.01918092500000057,
+        "maxMs": 0.3013069999997242,
+        "perRequestMeanMs": 0.01918092500000057,
+        "share": 0.0033617979552094477
+      },
+      "authSync": {
+        "count": 594,
+        "meanMs": 0.06689586868685293,
+        "maxMs": 7.097255000000132,
+        "perRequestMeanMs": 0.06689586868685293,
+        "share": 0.010105835707016949
+      },
+      "upstreamHttp": {
+        "count": 288,
+        "meanMs": 5.366214149305547,
+        "maxMs": 18.545444999999745,
+        "perRequestMeanMs": 4.292971319444438,
+        "share": 0.7524195107108069
+      },
+      "meanDurationHttp": 5.705555555555556,
+      "authShareHttp": 0.0033617979552094477,
+      "upstreamShareHttp": 0.7524195107108069,
+      "endProfileAuth": {
+        "count": 73,
+        "meanMs": 0.020862273972628305,
+        "maxMs": 0.11229300000013609,
+        "perRequestMeanMs": 0.020862273972628305,
+        "share": 0.0030277256461269707
+      },
+      "endProfileUpstream": {
+        "count": 73,
+        "meanMs": 6.245699191780808,
+        "maxMs": 14.226880000000165,
+        "perRequestMeanMs": 6.245699191780808,
+        "share": 0.9064334811133181
+      },
+      "sessionCacheEntries": 5
+    },
+    {
+      "name": "hybrid-jwt",
+      "sessionCacheTtlMs": 5000,
+      "resolveViaCouchSession": true,
+      "jwtLocalVerify": true,
+      "notes": "Bearer local HS256 fast-path + 5s cache; Basic/Cookie → Couch",
+      "overallOpsPerSec": 284.39521988935735,
+      "syncOpsPerSec": 51.733200854441634,
+      "httpOpsPerSec": 671.9745638812285,
+      "bulkGetOpsPerSec": 556.6817536699931,
+      "proxyOverDirectRatio": 0.584367003806012,
+      "overheadPct": 41.5632996193988,
+      "authHttp": {
+        "count": 360,
+        "meanMs": 0.01646345000002738,
+        "maxMs": 0.12144899999930203,
+        "perRequestMeanMs": 0.01646345000002738,
+        "share": 0.002973829402915131
+      },
+      "authSync": {
+        "count": 587,
+        "meanMs": 0.039091850085180985,
+        "maxMs": 2.6672789999997804,
+        "perRequestMeanMs": 0.039091850085180985,
+        "share": 0.005591353801169892
+      },
+      "upstreamHttp": {
+        "count": 288,
+        "meanMs": 5.205243972222231,
+        "maxMs": 15.626599999999598,
+        "perRequestMeanMs": 4.164195177777785,
+        "share": 0.7521877892624197
+      },
+      "meanDurationHttp": 5.536111111111111,
+      "authShareHttp": 0.002973829402915131,
+      "upstreamShareHttp": 0.7521877892624197,
+      "endProfileAuth": {
+        "count": 73,
+        "meanMs": 0.017158767123251043,
+        "maxMs": 0.075619999999617,
+        "perRequestMeanMs": 0.017158767123251043,
+        "share": 0.002436945525286627
+      },
+      "endProfileUpstream": {
+        "count": 73,
+        "meanMs": 6.46149769863016,
+        "maxMs": 14.62772600000062,
+        "perRequestMeanMs": 6.46149769863016,
+        "share": 0.9176835252918322
+      },
+      "sessionCacheEntries": 5
+    },
+    {
+      "name": "local-jwt",
+      "sessionCacheTtlMs": 5000,
+      "resolveViaCouchSession": false,
+      "jwtLocalVerify": true,
+      "notes": "In-house Bearer JWT only + 5s cache (no /_session)",
+      "overallOpsPerSec": 279.96482019675346,
+      "syncOpsPerSec": 51.43925354891222,
+      "httpOpsPerSec": 653.5341805075135,
+      "bulkGetOpsPerSec": 532.1532381960625,
+      "proxyOverDirectRatio": 0.5621091654563491,
+      "overheadPct": 43.789083454365084,
+      "authHttp": {
+        "count": 360,
+        "meanMs": 0.017989288888897035,
+        "maxMs": 0.3116549999995186,
+        "perRequestMeanMs": 0.017989288888897035,
+        "share": 0.003171471106759516
+      },
+      "authSync": {
+        "count": 573,
+        "meanMs": 0.028177776614269102,
+        "maxMs": 0.6010270000001583,
+        "perRequestMeanMs": 0.028177776614269102,
+        "share": 0.003962175705515631
+      },
+      "upstreamHttp": {
+        "count": 288,
+        "meanMs": 5.4246295381944565,
+        "maxMs": 15.291150000000016,
+        "perRequestMeanMs": 4.339703630555565,
+        "share": 0.7650799740450556
+      },
+      "meanDurationHttp": 5.6722222222222225,
+      "authShareHttp": 0.003171471106759516,
+      "upstreamShareHttp": 0.7650799740450556,
+      "endProfileAuth": {
+        "count": 73,
+        "meanMs": 0.01712083561654266,
+        "maxMs": 0.043398000000706816,
+        "perRequestMeanMs": 0.01712083561654266,
+        "share": 0.0024651301775298114
+      },
+      "endProfileUpstream": {
+        "count": 73,
+        "meanMs": 6.373234287671151,
+        "maxMs": 16.223038000000088,
+        "perRequestMeanMs": 6.373234287671151,
+        "share": 0.917645173570008
+      },
+      "sessionCacheEntries": 5
+    },
+    {
+      "name": "local-jwt-nocache",
+      "sessionCacheTtlMs": 0,
+      "resolveViaCouchSession": false,
+      "jwtLocalVerify": true,
+      "notes": "In-house Bearer JWT every request (no principal cache)",
+      "overallOpsPerSec": 258.92440169539356,
+      "syncOpsPerSec": 47.72880564754593,
+      "httpOpsPerSec": 585.0971361443884,
+      "bulkGetOpsPerSec": 552.4816940562034,
+      "proxyOverDirectRatio": 0.4977391123414309,
+      "overheadPct": 50.2260887658569,
+      "authHttp": {
+        "count": 360,
+        "meanMs": 0.7172263944444113,
+        "maxMs": 8.189414000000397,
+        "perRequestMeanMs": 0.7172263944444113,
+        "share": 0.11095896089384963
+      },
+      "authSync": {
+        "count": 584,
+        "meanMs": 0.6999452106164191,
+        "maxMs": 4.359843999999612,
+        "perRequestMeanMs": 0.6999452106164191,
+        "share": 0.08934819737704672
+      },
+      "upstreamHttp": {
+        "count": 288,
+        "meanMs": 5.402267885416677,
+        "maxMs": 16.16096799999923,
+        "perRequestMeanMs": 4.321814308333342,
+        "share": 0.6686090034379042
+      },
+      "meanDurationHttp": 6.463888888888889,
+      "authShareHttp": 0.11095896089384963,
+      "upstreamShareHttp": 0.6686090034379042,
+      "endProfileAuth": {
+        "count": 73,
+        "meanMs": 1.0872129863013944,
+        "maxMs": 3.741559999999481,
+        "perRequestMeanMs": 1.0872129863013944,
+        "share": 0.1480719179104511
+      },
+      "endProfileUpstream": {
+        "count": 73,
+        "meanMs": 5.613260424657536,
+        "maxMs": 8.971918999999616,
+        "perRequestMeanMs": 5.613260424657536,
+        "share": 0.7644925578358212
+      },
+      "sessionCacheEntries": 0
+    }
+  ]
+}

@@ -54,8 +54,16 @@ export function authHeaders(
   return { Authorization: `Basic ${b64}` };
 }
 
-/** Admin Basic-auth headers for privileged setup operations. */
+/**
+ * Admin auth headers for privileged setup.
+ *
+ * Default: HTTP Basic (`admin`/`password`).
+ * When the proxy runs with `AUTH_RESOLVE_VIA_COUCH_SESSION=false` (Bearer-only
+ * local JWT), set `PERF_ADMIN_JWT` to a minted admin token (`roles: ["_admin"]`)
+ * — Basic cannot resolve a principal in that mode.
+ */
 export function adminHeaders(): Record<string, string> {
+  if (process.env.PERF_ADMIN_JWT) return authHeaders("jwt", process.env.PERF_ADMIN_JWT);
   return authHeaders("basic", ADMIN_USER, ADMIN_PASS);
 }
 
