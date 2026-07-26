@@ -143,7 +143,12 @@ export async function ensureDocRows(
   ids: Iterable<string>,
 ): Promise<void> {
   if (state.noacl) return;
-  const unique = [...new Set(ids)].filter((id) => typeof id === "string" && id.length > 0);
+  // `_local/*` never appears in the ACL view; keyed `_all_docs` can still report
+  // them as live winners, and reconcile would fail closed. Listings keep the
+  // missing-row deny; individual `_local` CRUD uses the DB-gated pipe actor.
+  const unique = [...new Set(ids)].filter(
+    (id) => typeof id === "string" && id.length > 0 && !id.startsWith("_local/"),
+  );
   if (unique.length === 0) return;
 
   const missing = unique.filter((id) => !state.acl.has(id));

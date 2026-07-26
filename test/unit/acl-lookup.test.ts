@@ -2,7 +2,7 @@
  * Unit tests for flagsForDoc missing-row / admin short-circuit semantics.
  */
 import { describe, expect, it, vi } from "vitest";
-import { canReadEnsured, flagsForDoc } from "../../src/acl/lookup.js";
+import { canReadEnsured, ensureDocRows, flagsForDoc } from "../../src/acl/lookup.js";
 import { aclRowFromDoc } from "../../src/acl/resolve.js";
 import { buildPrincipal } from "../../src/auth/principal.js";
 import type { AclCache, DbAclState } from "../../src/acl/cache.js";
@@ -95,6 +95,17 @@ describe("canReadEnsured", () => {
     await expect(
       canReadEnsured(cache, state, principal("bob", ["writers"]), "rec-1"),
     ).resolves.toBe(true);
+    expect(ensureDocs).toHaveBeenCalledWith("test", ["rec-1"]);
+  });
+});
+
+describe("ensureDocRows", () => {
+  it("skips _local ids so listings cannot fail closed via view reconcile", async () => {
+    const state = emptyState();
+    const ensureDocs = vi.fn(async () => undefined);
+    const cache = { ensureDocs } as unknown as AclCache;
+
+    await ensureDocRows(cache, state, ["_local/checkpoint", "rec-1"]);
     expect(ensureDocs).toHaveBeenCalledWith("test", ["rec-1"]);
   });
 });

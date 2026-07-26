@@ -81,6 +81,8 @@ function normalizeFeed(feed: string): string {
 function needsAclWarm(state: DbAclState, principal: Principal, docId: string): boolean {
   if (principal.admin || state.noacl) return false;
   if (!docId || typeof docId !== "string") return false;
+  // Local docs are not ACL-mapped; keep missing-row deny without ensure.
+  if (docId.startsWith("_local/")) return false;
   return !state.acl.has(docId);
 }
 
