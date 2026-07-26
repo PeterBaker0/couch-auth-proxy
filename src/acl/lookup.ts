@@ -1,9 +1,11 @@
 /**
  * Synchronous ACL lookups against a ready `DbAclState`.
  *
- * Actors call these after `AclCache.requireReady` (and often `ensureDocRow`)
- * to decide whether a principal may read/write/delete a document. Fail-closed
- * for reads when the row is not yet cached — never briefly open a doc.
+ * Actors call these after `AclCache.requireReady` and, for ids that may be
+ * absent from the in-memory map, `ensureDocRow(s)` — then use the sync helpers.
+ * A missing row is fail-closed for reads (`missing-row-create-path`) so a cold
+ * cache never briefly opens a doc; live `_changes` / list filters must warm
+ * via `ensureDocRows` before treating that as a real deny.
  *
  * Verbose logs (`LOG_LEVEL=verbose`) explain missing-row create paths,
  * design-doc denials, and noacl/admin short-circuits.
@@ -105,6 +107,21 @@ export function canDelete(state: DbAclState, principal: Principal, docId: string
 }
 
 /**
+ * Warm the ACL row for `docId` (if missing), then authorize read.
+ * Use on paths that observe document ids from Couch before the changes
+ * follower may have written them into the in-memory map.
+ */
+export async function canReadEnsured(
+  cache: AclCache,
+  state: DbAclState,
+  principal: Principal,
+  docId: string,
+): Promise<boolean> {
+  await ensureDocRows(cache, state, [docId]);
+  return canRead(state, principal, docId);
+}
+
+/**
  * Ensure the ACL row (and parent row, if any) is present before single-doc checks.
  * Fetches missing rows via the admin ACL view — opaque-seq safe (keyed by id).
  */
@@ -126,7 +143,12 @@ export async function ensureDocRows(
   ids: Iterable<string>,
 ): Promise<void> {
   if (state.noacl) return;
-  const unique = [...new Set(ids)].filter((id) => typeof id === "string" && id.length > 0);
+  // `_local/*` never appears in the ACL view; keyed `_all_docs` can still report
+  // them as live winners, and reconcile would fail closed. Listings keep the
+  // missing-row deny; individual `_local` CRUD uses the DB-gated pipe actor.
+  const unique = [...new Set(ids)].filter(
+    (id) => typeof id === "string" && id.length > 0 && !id.startsWith("_local/"),
+  );
   if (unique.length === 0) return;
 
   const missing = unique.filter((id) => !state.acl.has(id));

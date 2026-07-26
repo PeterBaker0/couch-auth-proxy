@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-07-26
+
+### Fixed
+
+- Live `_changes` filtering no longer denies solely because an ACL row is missing
+  from the in-memory cache (`missing-row-create-path`). Continuous / eventsource /
+  normal / longpoll feeds warm cold ids via `ensureDocRows` / `cache.ensureDocs`,
+  then authorize with `resolveDocAcl` (row + parent + `dbacl`). True denials and
+  create-path / not-found semantics remain after a successful ensure; view/admin
+  failures still fail closed. Same warm-before-filter applied to `_all_docs` /
+  views / `_find` response filtering.
+
+### Changed
+
+- `filterChangesStream` now takes `AclCache` so stream filters can warm on miss.
+- Added `canReadEnsured` for ensure-then-authorize on single-id read paths.
+
 ## [1.6.0] - 2026-07-25
 
 ### Added

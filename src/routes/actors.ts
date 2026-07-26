@@ -935,6 +935,15 @@ export const actors: Record<string, Actor> = {
       requestBodyJson?.keys != null ||
       requestBodyJson?.key != null;
     const preserveDenied = hasKeys && !isView;
+    // Warm cold ACL rows before sync canRead — same race as `_changes`.
+    const warmIds: string[] = [];
+    for (const row of body.rows ?? []) {
+      const rowId = row.id ?? row.doc?._id;
+      if (typeof rowId === "string" && rowId) warmIds.push(rowId);
+      const embeddedId = row.doc?._id;
+      if (typeof embeddedId === "string" && embeddedId) warmIds.push(embeddedId);
+    }
+    await ensureDocRows(c.get("aclCache"), state, warmIds);
     const filtered = profileSync("filter", () =>
       filterRows(state, principal, body, {
         preserveDenied,
@@ -988,6 +997,7 @@ export const actors: Record<string, Actor> = {
 
     const filtered = filterChangesStream(
       upstream.body,
+      c.get("aclCache"),
       state,
       principal,
       feed === "live" ? "continuous" : feed,
@@ -1325,6 +1335,14 @@ export const actors: Record<string, Actor> = {
       throw err;
     }
     const principal = c.get("principal");
+    // Warm cold ACL rows before sync canRead — same race as `_changes`.
+    await ensureDocRows(
+      c.get("aclCache"),
+      state,
+      (body.docs ?? [])
+        .map((doc) => doc._id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    );
     const filtered = profileSync("filter", () => filterFindDocs(state, principal, body));
     logDecision("find", {
       decision: "filter",
