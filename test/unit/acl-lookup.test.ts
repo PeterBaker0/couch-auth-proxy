@@ -1,10 +1,11 @@
 /**
  * Unit tests for flagsForDoc missing-row / admin short-circuit semantics.
  */
-import { describe, expect, it } from "vitest";
-import { flagsForDoc } from "../../src/acl/lookup.js";
+import { describe, expect, it, vi } from "vitest";
+import { canReadEnsured, flagsForDoc } from "../../src/acl/lookup.js";
+import { aclRowFromDoc } from "../../src/acl/resolve.js";
 import { buildPrincipal } from "../../src/auth/principal.js";
-import type { DbAclState } from "../../src/acl/cache.js";
+import type { AclCache, DbAclState } from "../../src/acl/cache.js";
 
 function principal(name: string, roles: string[] = []) {
   return buildPrincipal({
@@ -74,5 +75,26 @@ describe("flagsForDoc", () => {
       _w: false,
       _d: false,
     });
+  });
+});
+
+describe("canReadEnsured", () => {
+  it("warms a missing row then authorizes with resolveDocAcl + dbacl", async () => {
+    const state = emptyState();
+    state.dbacl = { _r: ["r-writers"], _w: [], _d: [] };
+    const ensureDocs = vi.fn(async (_db: string, ids: readonly string[]) => {
+      for (const id of ids) {
+        state.acl.set(id, aclRowFromDoc({ _id: id, creator: "guest" }));
+      }
+    });
+    const cache = { ensureDocs } as unknown as AclCache;
+
+    // Sync path denies cold miss even with dbacl (create-path).
+    expect(flagsForDoc(state, principal("bob", ["writers"]), "rec-1")._r).toBe(false);
+
+    await expect(
+      canReadEnsured(cache, state, principal("bob", ["writers"]), "rec-1"),
+    ).resolves.toBe(true);
+    expect(ensureDocs).toHaveBeenCalledWith("test", ["rec-1"]);
   });
 });

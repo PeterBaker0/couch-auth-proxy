@@ -1,9 +1,11 @@
 /**
  * Synchronous ACL lookups against a ready `DbAclState`.
  *
- * Actors call these after `AclCache.requireReady` (and often `ensureDocRow`)
- * to decide whether a principal may read/write/delete a document. Fail-closed
- * for reads when the row is not yet cached — never briefly open a doc.
+ * Actors call these after `AclCache.requireReady` and, for ids that may be
+ * absent from the in-memory map, `ensureDocRow(s)` — then use the sync helpers.
+ * A missing row is fail-closed for reads (`missing-row-create-path`) so a cold
+ * cache never briefly opens a doc; live `_changes` / list filters must warm
+ * via `ensureDocRows` before treating that as a real deny.
  *
  * Verbose logs (`LOG_LEVEL=verbose`) explain missing-row create paths,
  * design-doc denials, and noacl/admin short-circuits.
@@ -102,6 +104,21 @@ export function canWrite(state: DbAclState, principal: Principal, docId: string)
 /** True if the principal may delete `docId`. */
 export function canDelete(state: DbAclState, principal: Principal, docId: string): boolean {
   return flagsForDoc(state, principal, docId)._d;
+}
+
+/**
+ * Warm the ACL row for `docId` (if missing), then authorize read.
+ * Use on paths that observe document ids from Couch before the changes
+ * follower may have written them into the in-memory map.
+ */
+export async function canReadEnsured(
+  cache: AclCache,
+  state: DbAclState,
+  principal: Principal,
+  docId: string,
+): Promise<boolean> {
+  await ensureDocRows(cache, state, [docId]);
+  return canRead(state, principal, docId);
 }
 
 /**

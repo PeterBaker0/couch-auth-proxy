@@ -110,6 +110,7 @@ Unmapped endpoints return **404** for non-admins (default-deny). `_list`, `_show
 - Principal-dependent list responses disable shared validators and caching so an old authorized representation cannot survive an ACL or role change.
 - Filtered row responses omit unfiltered `total_rows`, `offset`, and `update_seq`; Mango responses omit unfiltered execution statistics for non-admins.
 - Continuous `_changes` sequences are opaque strings (Couch 2+/3); never treat them as integers.
+- Live `_changes` (continuous / longpoll / eventsource) may briefly await an ACL view / `_all_docs` warm when a change id is not yet in the in-memory cache. Cold cache never denies by itself; true denials happen only after ensure. Ensure/view failures still fail closed (**503** / drop).
 - ACL cache is ~hundreds of bytes per doc per process; preload via `COUCH_PRELOAD_DBS` and/or `COUCH_PRELOAD_DB_INCLUDE`.
 - Initial ACL view loads are paginated; the in-memory cache still contains one compact row per document.
 - ACL view/admin failures and a down `_changes` follower fail closed (**503**), never serve on a stale cache.

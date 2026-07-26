@@ -589,6 +589,159 @@ describe("security edge cases", () => {
       const body = (await res.json()) as { error?: string };
       expect(body.error).toBe("bad_request");
     });
+
+    it("live continuous _changes warms cold ACL rows (dbacl reader sees guest create)", async () => {
+      // Reproduce FAIMS race: contributor feed open before guest write; cold
+      // in-memory miss must ensure+authorize, not permanently drop the seq.
+      let prevDbacl: unknown;
+      let putOk = false;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const get = await fetch(`${PROXY}/${DB}/_design/acl`, { headers: adminHeaders() });
+        expect(get.status).toBe(200);
+        const ddoc = (await get.json()) as Record<string, unknown> & { _rev: string };
+        prevDbacl = ddoc.dbacl;
+        ddoc.dbacl = { _r: ["r-writers"], _w: [], _d: [] };
+        const put = await fetch(`${PROXY}/${DB}/_design/acl`, {
+          method: "PUT",
+          headers: { ...adminHeaders(), "Content-Type": "application/json" },
+          body: JSON.stringify(ddoc),
+        });
+        if (put.ok) {
+          putOk = true;
+          break;
+        }
+        if (put.status !== 409) {
+          throw new Error(`dbacl put: ${put.status} ${await put.text()}`);
+        }
+        await sleep(100);
+      }
+      expect(putOk).toBe(true);
+
+      const seen = new Set<string>();
+      let feedError: unknown;
+      const controller = new AbortController();
+      let feedDone: Promise<void> | undefined;
+      try {
+        // Wait until dbacl is live for bob on an existing private doc.
+        await waitForReadable(DB, ids.alicePrivate, authHeaders("jwt", bobJwt));
+
+        const sinceRes = await fetch(`${PROXY}/${DB}/_changes?since=now&feed=normal&timeout=1`, {
+          headers: authHeaders("jwt", bobJwt),
+        });
+        expect(sinceRes.status).toBe(200);
+        const sinceBody = (await sinceRes.json()) as { last_seq: string | number };
+        const since = sinceBody.last_seq;
+
+        feedDone = (async () => {
+          const res = await fetch(
+            `${PROXY}/${DB}/_changes?feed=continuous&heartbeat=1000&include_docs=true&since=${encodeURIComponent(String(since))}`,
+            { headers: authHeaders("jwt", bobJwt), signal: controller.signal },
+          );
+          if (!res.ok || !res.body) throw new Error(`live feed ${res.status}`);
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+          try {
+            while (!controller.signal.aborted) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+              let nl: number;
+              while ((nl = buf.indexOf("\n")) >= 0) {
+                const line = buf.slice(0, nl).trim();
+                buf = buf.slice(nl + 1);
+                if (!line) continue;
+                try {
+                  const obj = JSON.parse(line) as { id?: string };
+                  if (typeof obj.id === "string") seen.add(obj.id);
+                } catch {
+                  // heartbeat / partial
+                }
+              }
+            }
+          } catch (err) {
+            if ((err as Error).name !== "AbortError") feedError = err;
+          } finally {
+            await reader.cancel().catch(() => {});
+          }
+        })();
+
+        // Give the continuous feed time to connect before guest writes.
+        await sleep(300);
+
+        const recId = `rec-live-${suiteId}`;
+        const childId = `frev-live-${suiteId}`;
+        const putRec = await putDoc(
+          DB,
+          recId,
+          { creator: "alice", kind: "rec", body: "guest-create" },
+          authHeaders("jwt", aliceJwt),
+        );
+        expect(putRec.ok, `rec put: ${putRec.status} ${await putRec.text()}`).toBe(true);
+        const putChild = await putDoc(
+          DB,
+          childId,
+          { creator: "alice", parent: recId, kind: "frev", body: "child" },
+          authHeaders("jwt", aliceJwt),
+        );
+        expect(putChild.ok, `child put: ${putChild.status} ${await putChild.text()}`).toBe(true);
+
+        // Stress: rapid creates while feed is open — all must appear.
+        const rapidIds: string[] = [];
+        for (let i = 0; i < 8; i++) {
+          const id = `rec-rapid-${suiteId}-${i}`;
+          rapidIds.push(id);
+          const put = await putDoc(
+            DB,
+            id,
+            { creator: "alice", kind: "rec", body: `rapid-${i}` },
+            authHeaders("jwt", aliceJwt),
+          );
+          expect(put.ok, `rapid put ${id}: ${put.status}`).toBe(true);
+        }
+
+        await waitUntil(
+          "live feed saw guest rec + rapid creates",
+          async () => seen.has(recId) && seen.has(childId) && rapidIds.every((id) => seen.has(id)),
+          25_000,
+          100,
+        );
+
+        // Guest isolation: carol (readers, no dbacl grant) must not see alice's private rec.
+        const carolChanges = await fetch(
+          `${PROXY}/${DB}/_changes?include_docs=true&since=0&limit=500`,
+          { headers: authHeaders("jwt", carolJwt) },
+        );
+        expect(carolChanges.status).toBe(200);
+        const carolBody = (await carolChanges.json()) as { results: Array<{ id: string }> };
+        const carolIds = new Set(carolBody.results.map((r) => r.id));
+        expect(carolIds.has(recId)).toBe(false);
+        expect(carolIds.has(ids.alicePrivate)).toBe(false);
+      } finally {
+        controller.abort();
+        await feedDone?.catch(() => {});
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const again = await fetch(`${PROXY}/${DB}/_design/acl`, { headers: adminHeaders() });
+          const cur = (await again.json()) as Record<string, unknown>;
+          if (prevDbacl === undefined) delete cur.dbacl;
+          else cur.dbacl = prevDbacl;
+          const restore = await fetch(`${PROXY}/${DB}/_design/acl`, {
+            method: "PUT",
+            headers: { ...adminHeaders(), "Content-Type": "application/json" },
+            body: JSON.stringify(cur),
+          });
+          if (restore.ok || restore.status !== 409) break;
+          await sleep(100);
+        }
+        await waitUntil(
+          "dbacl cleared for bob on alicePrivate",
+          async () =>
+            (await getDoc(DB, ids.alicePrivate, authHeaders("jwt", bobJwt))).status === 404,
+          20_000,
+        );
+      }
+      if (feedError) throw feedError;
+    });
   });
 
   // ── Bulk edges ─────────────────────────────────────────────────────────
